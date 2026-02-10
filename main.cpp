@@ -1,3 +1,20 @@
+/**
+ *  "信赖域启发式的投影牛顿线搜索法"：
+
+    ✅ 使用信赖域比率评估模型质量
+
+    ✅ 基于比率自适应调整数值方法
+
+    ❌ 没有显式信赖域半径
+
+    ❌ 没有信赖域约束子问题
+
+    ✅ 用线搜索替代步长控制
+    线搜索：固定方向，调整步长 α
+    信赖域：在球内优化，调整方向 d 和步长
+ * 
+ */
+
 #include <igl/readMESH.h>
 #include <igl/writeOBJ.h>
 #include <igl/writeMESH.h>
@@ -36,8 +53,11 @@ int main(int argc, char** argv)
   cxxopts::Options options("Projected Newton with a trust region", "Choose eigenvalue filtering method: adaptive, clamp, abs");
 
   options.add_options()
-    ("abs", "use absolute eigenvalue projection strategy instread", cxxopts::value<bool>()->default_value("false"))
-    ("clamp", "use eigenvalue clamping strategy instread", cxxopts::value<bool>()->default_value("false"))
+    ("diff", "add differentiable eigenvalue projection strategy ", cxxopts::value<bool>()->default_value("false")) // 若设置diff，后续可微的clamp和abs等
+    ("delta", "Projection threshold for the eigenvalue projection", cxxopts::value<std::string>()->default_value("0.001"))  // 过渡区间宽度
+    ("beta", "Projection threshold for the eigenvalue projection", cxxopts::value<std::string>()->default_value("10.0"))// 光滑参数
+    ("abs", "use absolute eigenvalue projection strategy instead", cxxopts::value<bool>()->default_value("false"))
+    ("clamp", "use eigenvalue clamping strategy instead", cxxopts::value<bool>()->default_value("false"))
     ("p,epsilon", "Projection threshold for the eigenvalue projection", cxxopts::value<std::string>()->default_value("-0.5"))
     ("n,mesh_name", "Mesh name", cxxopts::value<std::string>()->default_value("bimba"))
     ("l,pose_label", "Pose label", cxxopts::value<std::string>()->default_value("stretch"))
@@ -60,6 +80,13 @@ int main(int argc, char** argv)
       return 0;
   }
 
+  const bool diff = result["diff"].as<bool>();
+  std::string delta_str = result["delta"].as<std::string>();
+  double delta = std::stod(delta_str);
+  std::string beta_str = result["beta"].as<std::string>();
+  double beta = std::stod(beta_str);
+
+
   const bool abs = result["abs"].as<bool>();
   const bool clamp = result["clamp"].as<bool>();
   std::string eps_str = result["epsilon"].as<std::string>();
@@ -72,24 +99,43 @@ int main(int argc, char** argv)
   const double convergence_eps = result["convergence_eps"].as<double>();
   const double YM = result["ym"].as<double>();
   const double PR = result["pr"].as<double>();
-  const double tr_threshold = result["tr"].as<double>();
+  const double tr_threshold = result["tr"].as<double>(); // 信赖域接受步长的阈值，通常设置为0.01
   const std::string experiment_folder = result["experiment_name"].as<std::string>() == "" ? ("figure_" + mesh_name) : result["experiment_name"].as<std::string>();
   const double rotate_ratio = result["rotate_ratio"].as<double>();
+
+  /*
+  * 0: clamp
+  * -1: abs
+  * -0.5: adaptive (default)
+  * 0.5: differentiable  (if diff is set)
+  */
 
   if (clamp || eps == 0) {
       // we use eps = 0 as a flag for clamp projection, see lines 71-78 in our modified `TinyAD/include/TinyAD/Utils/HessianProjection.hh`
       eps_str = "clamp";
       eps = 0;  
+
+      if (diff) {
+          // we use eps = 0.5 as a flag for differentiable clamp projection, see lines 71-78 in our modified `TinyAD/include/TinyAD/Utils/HessianProjection.hh`
+          eps_str = "diff_clamp";
+      }
   }
   else if (abs || eps == -1) {
       // we use eps = -1 as a flag for abs projection, see lines 71-78 in our modified `TinyAD/include/TinyAD/Utils/HessianProjection.hh`
       eps_str = "abs";
       eps = -1;
+      if (diff) {
+          // we use eps = -0.5 as a flag for differentiable abs projection, see lines 71-78 in our modified `TinyAD/include/TinyAD/Utils/HessianProjection.hh`
+          eps_str = "diff_abs";
+      }
   }
   else {
       // set the default to adaptive
       eps_str = "adaptive";
       eps = -0.5;
+      if (diff) {
+          eps_str = "diff_adaptive";
+      }
   }
     
   if (!std::filesystem::exists("../results/"))
@@ -151,6 +197,9 @@ int main(int argc, char** argv)
     TINYAD_DEBUG_OUT("Trust region threshold: " << tr_threshold);
     TINYAD_DEBUG_OUT("Experiment folder: " << experiment_folder);
     TINYAD_DEBUG_OUT("Rotate ratio: " << rotate_ratio);
+    TINYAD_DEBUG_OUT("delta, transition_width of diff: " << delta);
+    TINYAD_DEBUG_OUT("beta, smoothing_param of diff: " << beta);
+    
   }
 
   Eigen::MatrixXd V, U; // #V-by-3 3D vertex positions
@@ -207,14 +256,28 @@ int main(int argc, char** argv)
         Eigen::Vector3d cr = V.row(F(f_idx, 2));
         Eigen::Vector3d dr = V.row(F(f_idx, 3));
 
-        // Save 3-by-3 matrix with edge vectors as colums
+        // Save 3-by-3 matrix with edge vectors as columns
         rest_shapes[f_idx] = TinyAD::col_mat(br - ar, cr - ar, dr - ar);
       };
 
+      /*
+          TinyAD::scalar_function<3>: 创建一个标量函数，每个变量是3维向量（例如3D顶点坐标）
+          TinyAD::range(V.rows()): 定义变量的范围，V.rows() 是顶点数量
+          auto func: 自动推断函数对象类型
+      */ 
+      // TinyAD::scalar_function(n)：这是一个函数，可以计算它的函数值、梯度、Hessian的函数，其自变量索引的范围为n
       // Set up function with 3d vertex positions as variables.
       auto func = TinyAD::scalar_function<3>(TinyAD::range(V.rows()));
 
+      // func.add_elements<n>(element_range, energy_function); 
+      // 定义元素的能量项，1.n为元素的dim，其中2.element_range是元素索引的范围，
+      // 3.energy_function是一个lambda函数，接受一个元素对象，返回该元素的能量值
+      // 4. lamda函数 [捕获变量] (输入参数) -> 返回值 
+      // 5. 所有参与自动微分计算的变量和中间结果，都必须使用 TINYAD_SCALAR_TYPE 或其衍生的类型
+      // 6. element.handle对应element_range中的当前元素的索引，element.variables()对应输入变量，想要访问输入变量的第i个变量
+      // 7. 在这个地方，输入变量是顶点数组，element_range是F数组，即按F计算能量
       // Add objective term per element. Each connecting 4 vertices.
+      // "neo-hooken energy" is defined on each tetrahedron, so element_range is F.rows() and element.variables() gives the vertex positions of the current tetrahedron.
       func.add_elements<4>(TinyAD::range(F.rows()), [&] (auto& element) -> TINYAD_SCALAR_TYPE(element) {
           // Evaluate element using either double or TinyAD::Double
           using T = TINYAD_SCALAR_TYPE(element);
@@ -228,10 +291,10 @@ int main(int argc, char** argv)
 
           Eigen::Matrix3<T> M = TinyAD::col_mat(b - a, c - a, d - a);
           Eigen::Matrix3d Mr = rest_shapes[f_idx];
-          Eigen::Matrix3<T> J = M * Mr.inverse();
+          Eigen::Matrix3<T> J = M * Mr.inverse(); // 可以放外边 to be optimized by zj
 
           // Compute the stable Neo-Hookean energy [Smith et al. 2018]
-          double A = 0.5 * Mr.determinant();
+          double A = 0.5 * Mr.determinant(); //可以放外边 to be optimized by zj
           const double mu = MU;
           const double lambda = LAMBDA;
           auto Ic = (J.transpose() * J).trace();
@@ -241,6 +304,14 @@ int main(int argc, char** argv)
           return A * W;
       });
 
+      // to be optimized by zj: 可以考虑把 rest_shapes 以及 pre-computed Mr.inverse() 放到外边，作为常量传入 lambda 函数中，这样就不需要每次迭代都计算 rest_shapes 和 Mr.inverse() 了
+      // to be optimized by zj: 还可以考虑把 A 也放到外边，因为 A 只和 rest_shapes 相关，而 rest_shapes 是不变的
+      // to be optimized by zj: 还可以考虑把 lambda 和 mu 放到外边，因为它们也是不变的
+      // to be modified by zj: 动态状态下的PD，增加local step，即每个元素的能量项不仅依赖于当前状态，还依赖于上一个状态，这样可以增加稳定性，尤其是在使用abs投影时
+
+      // func.x_from_data() 是 TinyAD 提供的数据格式转换工具，将外部数据（如顶点矩阵）转换为优化所需的展平向量格式，使代码更简洁、更安全。
+      // v_idx 的取值范围是由 TinyAD::scalar_function<k>(n_variables) 中的 n_variables 决定的，即函数的输入变量的维度。
+      // 在这个例子中，n_variables 是 V.rows()，即顶点数量，因此 v_idx 的取值范围是 [0, V.rows()-1]。
       // Assemble inital x vector from U matrix.
       // x_from_data(...) takes a lambda function that maps
       // each variable handle (vertex index) to its initial 2D value (Eigen::Vector2d).
@@ -251,19 +322,28 @@ int main(int argc, char** argv)
       TINYAD_DEBUG_OUT("Initial energy: " << func.eval(x));
 
       // Projected Newton
-      TinyAD::LinearSolver solver;
-      int max_iters = 200;
+      TinyAD::LinearSolver solver; //Eigen::SimplicialLDLT*,ConjugateGradient,SparseLU
+      int max_iters = 200; // 迭代次数可以根据需要调整
       Eigen::VectorXd d;
       Eigen::SparseMatrix<double> H;
       std::vector<double> hist;
       // record the trust region ratio
+      // 衡量模型预测的准确性 ρ = (实际下降) / (预测下降), 
+      // ρ < 0         → 实际目标函数值增加（拒绝步长）
+      // 0 ≤ ρ < 0.25  → 模型质量差，缩小信赖域
+      // 0.25 ≤ ρ < 0.75 → 模型质量一般，保持信赖域
+      // ρ ≥ 0.75      → 模型质量好，可以放大信赖域
+      // double delta;  // 当前信赖域半径
+      // double eta1;   // 接受步长的阈值（通常0.25）
+      // double eta2;   // 放大半径的阈值（通常0.75）
       std::vector<double> hist_trust_region_ratio;
       hist_trust_region_ratio.push_back(0.0);
 
-      std::vector<double> hist_trust_region_eps;
-      std::vector<double> hist_line_search_alpha;
-      std::vector<int> hist_line_search_iter;
-
+      std::vector<double> hist_trust_region_eps; // 记录每次迭代使用的eps值，以观察自适应策略的变化
+      std::vector<double> hist_line_search_alpha; // 记录每次迭代的线搜索步长
+      std::vector<int> hist_line_search_iter; // 记录每次迭代的线搜索迭代次数
+      
+      //当global matrix发生变化时，进行下面的牛顿投影和线搜索步骤
       for (int i = 0; i < max_iters; ++i)
       {
         igl::writeOBJ(output_folder + "obj/" + mesh_name + "_" + eps_str + "/" + output_tag + "_iter_" + std::to_string(i) + ".obj", U, FF);
@@ -271,7 +351,7 @@ int main(int argc, char** argv)
       
         // switch between clamp or abs depending on whether the trust region ratio is close to 1
         if(eps_str == "adaptive") {
-          eps = (std::fabs(hist_trust_region_ratio.back() - 1.0) < tr_threshold) ? 0.0 : -1;
+          eps = (std::fabs(hist_trust_region_ratio.back() - 1.0) < tr_threshold) ? 0.0 : -1; // tr_threshold信赖域接受步长的阈值，通常设置为0.01,大于接受
 
           if (eps == 0.0) {
             TINYAD_DEBUG_OUT("Switch to clamp");
@@ -281,8 +361,8 @@ int main(int argc, char** argv)
           }
           hist_trust_region_eps.push_back(eps);
         }
-        auto [f, g, H_proj] = func.eval_with_hessian_proj(x, eps);
-        Eigen::SparseMatrix<double> H0 = func.eval_hessian(x);
+        auto [f, g, H_proj] = func.eval_with_hessian_proj(x, eps); // 
+        Eigen::SparseMatrix<double> H0 = func.eval_hessian(x); // 计算未投影的Hessian，用于后续计算牛顿下降量和牛顿下降量
 
         // record the energy
         hist.push_back(f);
@@ -291,29 +371,42 @@ int main(int argc, char** argv)
 
         // Compute the Newton direction
         H = H_proj;
-        Eigen::VectorXd Pg = P*g;
+        Eigen::VectorXd Pg = P*g; // 固定点约束下的梯度
         Eigen::SparseMatrix<double> PHP = P*H*P.transpose();
-        d = TinyAD::newton_direction(Pg, PHP, solver);
+        d = TinyAD::newton_direction(Pg, PHP, solver); //用于计算牛顿方向的函数,sovler是线性方程求解器实例
         d = P.transpose() * d;
 
         TINYAD_DEBUG_OUT("Newton decrement " << i << " =  " << TinyAD::newton_decrement(d, g));
         TINYAD_DEBUG_OUT("d norm " << i << " =  " << d.norm());
         TINYAD_DEBUG_OUT("g norm " << i << " =  " << g.norm());
 
+        // 对于刚性材料（LAMBDA大）：收敛标准更严格; 对于柔软材料（LAMBDA小）：收敛标准更宽松
+        // 优化方案1： 相对收敛
+        // if (newton_decrement < convergence_eps * initial_decrement) break;  
+        // 方案3：梯度范数 
+        // if (g.norm() < convergence_eps) break;
+        // 方案4：牛顿下降量（Newton decrement）  Newton decrement = sqrt(d' * H * d)，它衡量了沿着牛顿方向的预期下降量
+        // 方案5：根据材料参数调整收敛标准
+        //  LAMBDA是材料参数，不是尺度参数
+        // // 使用特征长度进行无量纲化
+        // double characteristic_length = compute_mesh_size(V); // 计算网格特征尺寸
+        // double characteristic_volume = characteristic_length * characteristic_length * characteristic_length;
+        // // 物理意义的收敛判据
+        // if (std::fabs(TinyAD::newton_decrement(d, g)) < convergence_eps * LAMBDA * characteristic_volume) break;
         if (std::fabs(TinyAD::newton_decrement(d, g)) < convergence_eps * LAMBDA)
           break;
 
         // line search
         Eigen::VectorXd x_prev = x;
         x = TinyAD::line_search(x, d, f, g, func, 1.0, 0.8, 100, 1e-8);
-        double alpha = (x - x_prev).norm() / d.norm();
+        double alpha = (x - x_prev).norm() / d.norm(); // 计算实际步长与牛顿方向的比值，反映线搜索的收缩程度
         hist_line_search_alpha.push_back(alpha);
 
-        int line_search_iter = std::lround(std::log(alpha) / std::log(0.8)) + 1;
+        int line_search_iter = std::lround(std::log(alpha) / std::log(0.8)) + 1; // 计算线搜索迭代次数，基于初始步长和最终步长的比值
         hist_line_search_iter.push_back(line_search_iter);
 
         // compute the trust region ratio
-        double trust_region_ratio = compute_trust_region_ratio(func.eval(x), f, alpha*d, g, H0);
+        double trust_region_ratio = compute_trust_region_ratio(func.eval(x), f, alpha*d, g, H0); // 计算信赖域比率，评估模型预测的准确性
         hist_trust_region_ratio.push_back(trust_region_ratio);
 
         TINYAD_DEBUG_OUT("Trust region ratio: " << trust_region_ratio);
