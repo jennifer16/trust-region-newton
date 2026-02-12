@@ -41,4 +41,6 @@ inline Eigen::Index idx_from_handle(...) // Variadic argument has lowest priorty
                 "Handle type not supported. Please overload idx_from_handle() for your handle type or include one of the provided header files, e.g. TinyAD/Support/OpenMesh.hh.");
 }
 
+
+
 }

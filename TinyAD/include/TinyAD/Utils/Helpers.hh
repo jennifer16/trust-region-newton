@@ -88,4 +88,35 @@ Eigen::SparseMatrix<PassiveT> identity(
     return Id;
 }
 
+// 在 TinyAD 的头文件中添加
+enum class HessianProjectionMode {
+    AUTO = 0,      // 自动选择
+    SOFT_ABS = 1,   // 软 abs
+    ABS = 2,       // 直接取绝对值
+    ABS_NONDIFF = 3,       // 直接取绝对值
+
+    CLAMP = 4,     // 直接 clamp 到 epsilon
+    SOFT_CLAMP = 5, // 软 clamp
+    CLAMP_NONDIFF = 6,     // 直接 clamp 到 epsilon
+
+    CLAMP_ABS = 7, // clamp 到 epsilon + abs 负值
+    HYBRID = 8,    // 混合策略 
+    CLAMP_ABS_NONDIFF = 9, //  trust region newton
+
+    CLAMP_ABS_ADAPTIVE_NONDIFF = 10, // 自适应选择的非可微版本
+};
+
+// // 构造函数：可以配置不同的行为
+//     enum class Mode {
+//         AUTO,      // 自动选择
+//         CLAMP_ABS, // clamp 到 epsilon + abs 负值
+//         SOFT_CLAMP, // 软 clamp
+//         SOFT_ABS,   // 软 abs
+//         ABS,       // 直接取绝对值
+//         CLAMP,     // 直接 clamp 到 epsilon
+//         HYBRID     // 混合策略
+//         ABS_NONDIFF,       // 直接取绝对值
+//         CLAMP_NONDIFF,     // 直接 clamp 到 epsilon
+//     };
+
 }

@@ -258,6 +258,46 @@ eval_hessian_of_quadratic() const
     return eval_hessian(Eigen::VectorXd::Zero(n_vars));
 }
 
+// template <int variable_dimension, typename PassiveT, typename VariableHandleT>
+// void
+// ScalarFunction<variable_dimension, PassiveT, VariableHandleT>::
+// eval_with_hessian_proj(
+//         const Eigen::VectorX<PassiveT>& _x,
+//         PassiveT& _f,
+//         Eigen::VectorX<PassiveT>& _g,
+//         Eigen::SparseMatrix<PassiveT>& _H_proj,
+//         const PassiveT& _projection_eps) const
+// {
+//     TINYAD_ASSERT_EQ(_x.size(), n_vars);
+
+//     _f = 0.0;
+//     _g = Eigen::VectorX<PassiveT>::Zero(n_vars);
+//     _H_proj = Eigen::SparseMatrix<PassiveT>(n_vars, n_vars);
+//     std::vector<Eigen::Triplet<PassiveT>> H_proj_triplets;
+
+//     for (auto& objective : objective_terms)
+//         objective->eval_with_derivatives_add(_x, _f, _g, H_proj_triplets, true, _projection_eps);
+
+//     _H_proj.setFromTriplets(H_proj_triplets.begin(), H_proj_triplets.end());
+// }
+
+// template <int variable_dimension, typename PassiveT, typename VariableHandleT>
+// std::tuple<PassiveT, Eigen::VectorX<PassiveT>, Eigen::SparseMatrix<PassiveT>>
+// ScalarFunction<variable_dimension, PassiveT, VariableHandleT>::
+// eval_with_hessian_proj(
+//         const Eigen::VectorX<PassiveT>& _x,
+//         const PassiveT& _projection_eps) const
+// {
+//     TINYAD_ASSERT_EQ(_x.size(), n_vars);
+
+//     PassiveT f = 0.0;
+//     Eigen::VectorX<PassiveT> g;
+//     Eigen::SparseMatrix<PassiveT> H_proj;
+//     eval_with_hessian_proj(_x, f, g, H_proj, _projection_eps);
+
+//     return std::tuple<PassiveT, Eigen::VectorX<PassiveT>, Eigen::SparseMatrix<PassiveT>>(f, std::move(g), std::move(H_proj));
+// }
+
 template <int variable_dimension, typename PassiveT, typename VariableHandleT>
 void
 ScalarFunction<variable_dimension, PassiveT, VariableHandleT>::
@@ -266,7 +306,7 @@ eval_with_hessian_proj(
         PassiveT& _f,
         Eigen::VectorX<PassiveT>& _g,
         Eigen::SparseMatrix<PassiveT>& _H_proj,
-        const PassiveT& _projection_eps) const
+        const PassiveT& _projection_eps,HessianProjectionMode _mode ) const
 {
     TINYAD_ASSERT_EQ(_x.size(), n_vars);
 
@@ -275,8 +315,15 @@ eval_with_hessian_proj(
     _H_proj = Eigen::SparseMatrix<PassiveT>(n_vars, n_vars);
     std::vector<Eigen::Triplet<PassiveT>> H_proj_triplets;
 
+    //set_projection_mode(_mode); // 将投影模式传递给每个objective term
     for (auto& objective : objective_terms)
+    {
+        // #if DEBUG_OUTPUT
+        // TINYAD_DEBUG_OUT("Projection mode in eval_with_hessian_proj5: " << static_cast<int>(_mode)); 
+        // #endif
+        objective->set_projection_mode(_mode); // 将投影模式传递给每个objective term
         objective->eval_with_derivatives_add(_x, _f, _g, H_proj_triplets, true, _projection_eps);
+    }
 
     _H_proj.setFromTriplets(H_proj_triplets.begin(), H_proj_triplets.end());
 }
@@ -286,14 +333,18 @@ std::tuple<PassiveT, Eigen::VectorX<PassiveT>, Eigen::SparseMatrix<PassiveT>>
 ScalarFunction<variable_dimension, PassiveT, VariableHandleT>::
 eval_with_hessian_proj(
         const Eigen::VectorX<PassiveT>& _x,
-        const PassiveT& _projection_eps) const
+        const PassiveT& _projection_eps,
+    HessianProjectionMode _mode ) const
 {
     TINYAD_ASSERT_EQ(_x.size(), n_vars);
 
     PassiveT f = 0.0;
     Eigen::VectorX<PassiveT> g;
     Eigen::SparseMatrix<PassiveT> H_proj;
-    eval_with_hessian_proj(_x, f, g, H_proj, _projection_eps);
+    // #if DEBUG_OUTPUT
+    //     TINYAD_DEBUG_OUT("Projection mode in eval_with_hessian_proj: " << static_cast<int>(_mode)); 
+    // #endif 
+    eval_with_hessian_proj(_x, f, g, H_proj, _projection_eps, _mode);
 
     return std::tuple<PassiveT, Eigen::VectorX<PassiveT>, Eigen::SparseMatrix<PassiveT>>(f, std::move(g), std::move(H_proj));
 }

@@ -42,6 +42,15 @@ struct ScalarObjectiveTermBase
             std::vector<Eigen::Triplet<PassiveT>>& _H_proj_triplets,
             const bool _project_hessian,
             const PassiveT& _projection_eps) const = 0;
+
+    // 新增虚函数
+    virtual void set_projection_mode(HessianProjectionMode mode) {
+        // 默认实现：什么也不做（为了兼容性）
+    }
+    
+    virtual HessianProjectionMode get_projection_mode() const {
+        return HessianProjectionMode::AUTO;
+    }
 };
 
 /**
@@ -175,9 +184,18 @@ struct ScalarObjectiveTerm : ScalarObjectiveTermBase<PassiveT>
             element_results[i_element] = eval_element_active_second_order(elements[i_element]);
 
             if (_project_hessian)
-                // project_positive_definite_with_inv_g<n_element, PassiveT>(element_results[i_element].Hess, element_results[i_element].grad, _projection_eps);
-                project_positive_definite<n_element, PassiveT>(element_results[i_element].Hess, _projection_eps);
-
+            {
+                #ifdef DIFF_PROJECTED_NEWTON
+                    // #if DEBUG_OUTPUT
+                    // //TINYAD_DEBUG_OUT("Projection mode in eval_with_derivatives_add: " << static_cast<int>(get_projection_mode())); 
+                    // #endif
+                    project_positive_definite_diff<n_element, PassiveT>(element_results[i_element].Hess, _projection_eps, get_projection_mode());
+                #else       
+                    // project_positive_definite_with_inv_g<n_element, PassiveT>(element_results[i_element].Hess, element_results[i_element].grad, _projection_eps);
+                    project_positive_definite<n_element, PassiveT>(element_results[i_element].Hess, _projection_eps);
+                #endif
+            }
+                
             // Assert that derivatives are finite
             TINYAD_ASSERT_FINITE_MAT(element_results[i_element].grad);
             TINYAD_ASSERT_FINITE_MAT(element_results[i_element].Hess);
@@ -206,11 +224,23 @@ struct ScalarObjectiveTerm : ScalarObjectiveTermBase<PassiveT>
         }
     }
 
+    // 新增：设置投影模式的方法
+    void set_projection_mode(HessianProjectionMode mode) {
+        projection_mode_ = mode;
+    }
+    
+    HessianProjectionMode get_projection_mode() const {
+        return projection_mode_;
+    }
+
 private:
     const Eigen::Index n_vars_global;
 
     const std::vector<ElementHandleT> element_handles;
     const EvalSettings& settings;
+
+    // 新增：投影模式成员变量
+    HessianProjectionMode projection_mode_ = HessianProjectionMode::AUTO;
 
     // Instantiations of user-provided lambda
     PassiveEvalElementFunction eval_element_passive;

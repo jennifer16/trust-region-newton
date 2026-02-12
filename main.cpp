@@ -14,6 +14,13 @@
     信赖域：在球内优化，调整方向 d 和步长
  * 
  */
+#ifndef DIFF_PROJECTED_NEWTON
+  #define DIFF_PROJECTED_NEWTON 1
+#endif
+
+#ifndef DEBUG_OUTPUT
+  #define DEBUG_OUTPUT 1
+#endif
 
 #include <igl/readMESH.h>
 #include <igl/writeOBJ.h>
@@ -23,6 +30,7 @@
 #include <TinyAD/Utils/NewtonDirection.hh>
 #include <TinyAD/Utils/NewtonDecrement.hh>
 #include <TinyAD/Utils/LineSearch.hh>
+#include <TinyAD/Utils/Helpers.hh>
 
 #include <igl/boundary_facets.h>
 
@@ -36,6 +44,13 @@
 #include "fixed_point_constraints.h"
 #include "setup_initial_deformation.h"
 
+std::string get_time_str() {
+        auto t = std::time(nullptr);
+        auto tm = *std::localtime(&t);
+        std::ostringstream oss;
+        oss << std::put_time(&tm, "%Y%m%d_%H%M%S");
+        return oss.str();
+}
 // compute the trust region ratio
 double compute_trust_region_ratio(double e1, double e0, 
                                   const Eigen::VectorXd &d, 
@@ -47,6 +62,33 @@ double compute_trust_region_ratio(double e1, double e0,
     return (e0 - e1) / (0.0 - (d.dot(g) + 0.5 * d.transpose() * H * d));
 }
 
+// 从字符串解析模式
+TinyAD::HessianProjectionMode parse_projection_mode(const std::string& mode_str) {
+    static const std::map<std::string, TinyAD::HessianProjectionMode> mode_map = {
+        {"auto", TinyAD::HessianProjectionMode::AUTO},
+        {"clamp_abs", TinyAD::HessianProjectionMode::CLAMP_ABS},
+        {"soft_clamp", TinyAD::HessianProjectionMode::SOFT_CLAMP},
+        {"hybrid", TinyAD::HessianProjectionMode::HYBRID},
+
+        {"clamp", TinyAD::HessianProjectionMode::CLAMP},
+        {"soft_abs", TinyAD::HessianProjectionMode::SOFT_ABS},
+        {"abs", TinyAD::HessianProjectionMode::ABS},
+        {"abs_nondiff", TinyAD::HessianProjectionMode::ABS_NONDIFF},
+        {"clamp_nondiff", TinyAD::HessianProjectionMode::CLAMP_NONDIFF},
+        {"clamp_abs_nondiff", TinyAD::HessianProjectionMode::CLAMP_ABS_NONDIFF}, // 直接复用CLAMP_ABS的非可微版本
+        {"clamp_abs_adaptive_nondiff", TinyAD::HessianProjectionMode::CLAMP_ABS_ADAPTIVE_NONDIFF}, // 直接复用auto_regularize的非可微版本;
+    };
+    auto it = mode_map.find(mode_str);
+    if (it != mode_map.end()) {
+        return it->second;
+    }
+    
+    // 默认值
+    return TinyAD::HessianProjectionMode::AUTO;
+}
+
+
+
 int main(int argc, char** argv)
 {
   // parse command line arguments
@@ -54,8 +96,9 @@ int main(int argc, char** argv)
 
   options.add_options()
     ("diff", "add differentiable eigenvalue projection strategy ", cxxopts::value<bool>()->default_value("false")) // 若设置diff，后续可微的clamp和abs等
-    ("delta", "Projection threshold for the eigenvalue projection", cxxopts::value<std::string>()->default_value("0.001"))  // 过渡区间宽度
-    ("beta", "Projection threshold for the eigenvalue projection", cxxopts::value<std::string>()->default_value("10.0"))// 光滑参数
+    ("diff_mode", "differentiable eigenvalue projection mode", cxxopts::value<std::string>()->default_value("auto")) // 若设置diff，后续可微的clamp和abs等
+    // ("delta", "Projection threshold for the eigenvalue projection", cxxopts::value<std::string>()->default_value("0.001"))  // 过渡区间宽度
+   // ("beta", "Projection threshold for the eigenvalue projection", cxxopts::value<std::string>()->default_value("10.0"))// 光滑参数
     ("abs", "use absolute eigenvalue projection strategy instead", cxxopts::value<bool>()->default_value("false"))
     ("clamp", "use eigenvalue clamping strategy instead", cxxopts::value<bool>()->default_value("false"))
     ("p,epsilon", "Projection threshold for the eigenvalue projection", cxxopts::value<std::string>()->default_value("-0.5"))
@@ -81,10 +124,13 @@ int main(int argc, char** argv)
   }
 
   const bool diff = result["diff"].as<bool>();
-  std::string delta_str = result["delta"].as<std::string>();
-  double delta = std::stod(delta_str);
-  std::string beta_str = result["beta"].as<std::string>();
-  double beta = std::stod(beta_str);
+  //const int _mode = result["diff_mode"].as<int>();
+  std::string diff_mode_str = result["diff_mode"].as<std::string>();
+  TinyAD::HessianProjectionMode _diff_mode = parse_projection_mode(diff_mode_str);
+  // std::string delta_str = result["delta"].as<std::string>();
+  // double delta = std::stod(delta_str);
+  // std::string beta_str = result["beta"].as<std::string>();
+  // double beta = std::stod(beta_str);
 
 
   const bool abs = result["abs"].as<bool>();
@@ -109,33 +155,53 @@ int main(int argc, char** argv)
   * -0.5: adaptive (default)
   * 0.5: differentiable  (if diff is set)
   */
-
-  if (clamp || eps == 0) {
-      // we use eps = 0 as a flag for clamp projection, see lines 71-78 in our modified `TinyAD/include/TinyAD/Utils/HessianProjection.hh`
-      eps_str = "clamp";
-      eps = 0;  
-
-      if (diff) {
-          // we use eps = 0.5 as a flag for differentiable clamp projection, see lines 71-78 in our modified `TinyAD/include/TinyAD/Utils/HessianProjection.hh`
-          eps_str = "diff_clamp";
+  if (diff)
+  {
+      eps_str =  diff_mode_str;
+      //下面三种情况,eps值有特殊用处
+      if (_diff_mode == TinyAD::HessianProjectionMode::ABS_NONDIFF) {
+        eps_str = "abs";
+        eps = -1;
       }
-  }
-  else if (abs || eps == -1) {
-      // we use eps = -1 as a flag for abs projection, see lines 71-78 in our modified `TinyAD/include/TinyAD/Utils/HessianProjection.hh`
-      eps_str = "abs";
-      eps = -1;
-      if (diff) {
-          // we use eps = -0.5 as a flag for differentiable abs projection, see lines 71-78 in our modified `TinyAD/include/TinyAD/Utils/HessianProjection.hh`
-          eps_str = "diff_abs";
+      else if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_NONDIFF) {
+        eps_str = "clamp";
+        eps = 0;
+      }
+      else if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_NONDIFF) {
+        // set the default to adaptive
+        eps_str = "adaptive";
+        eps = -0.5;
+      }
+      else{
+         //非特殊情况,eps必须大于等于0
+        if (eps < 0)
+        {
+          eps = 0;
+        }
       }
   }
   else {
-      // set the default to adaptive
-      eps_str = "adaptive";
-      eps = -0.5;
-      if (diff) {
-          eps_str = "diff_adaptive";
-      }
+    if (clamp || eps == 0) {
+        // we use eps = 0 as a flag for clamp projection, see lines 71-78 in our modified `TinyAD/include/TinyAD/Utils/HessianProjection.hh`
+        eps_str = "clamp";
+        eps = 0; 
+        diff_mode_str = "clamp_nondiff"; 
+        _diff_mode = TinyAD::HessianProjectionMode::CLAMP_NONDIFF; 
+    }
+    else if (abs || eps == -1) {
+        // we use eps = -1 as a flag for abs projection, see lines 71-78 in our modified `TinyAD/include/TinyAD/Utils/HessianProjection.hh`
+        eps_str = "abs";
+        eps = -1;
+        diff_mode_str = "abs_nondiff"; 
+        _diff_mode = TinyAD::HessianProjectionMode::ABS_NONDIFF; 
+    }
+    else {
+        // set the default to adaptive
+        eps_str = "adaptive";
+        eps = -0.5;
+        diff_mode_str = "clamp_abs_nondiff"; // trust region newton;
+        _diff_mode = TinyAD::HessianProjectionMode::CLAMP_ABS_NONDIFF;
+    }
   }
     
   if (!std::filesystem::exists("../results/"))
@@ -145,8 +211,9 @@ int main(int argc, char** argv)
 
   const std::string output_folder = "../results/" + experiment_folder + "/" 
     + pose_label + "_YM_" + std::to_string(YM) + "_PR_" + std::to_string(PR)
-    + "_deformation_magnitude_" + std::to_string(deformation_magnitude) + "_deformation_ratio_" 
-    + std::to_string(deformation_ratio) + "_fixed_boundary_range_" + std::to_string(fixed_boundary_range)+ "/";
+    + "_deform_mag_" + std::to_string(deformation_magnitude) + "_deform_ratio_" 
+    + std::to_string(deformation_ratio) + "_fixed_boundary_range_" 
+    + std::to_string(fixed_boundary_range)+"_diff_mode_" + diff_mode_str+ "/";
   {
     // record the statistics
     if (!std::filesystem::exists(output_folder))
@@ -167,6 +234,16 @@ int main(int argc, char** argv)
       std::filesystem::create_directory(output_folder + "line_search_alpha/");
     if (!std::filesystem::exists(output_folder + "line_search_iter/"))
       std::filesystem::create_directory(output_folder + "line_search_iter/");
+    
+    #if DEBUG_OUTPUT
+    if (!std::filesystem::exists(output_folder + "debug_log/"))
+    {
+      std::filesystem::create_directory(output_folder + "debug_log/");
+      TINYAD_INIT_DEBUG_LOG(output_folder + "debug_log/log"+get_time_str()+".txt");
+    }
+    #endif
+
+    
   }
 
   const std::string output_tag = "mesh_" + mesh_name + "_eps_" + eps_str;
@@ -181,10 +258,12 @@ int main(int argc, char** argv)
  
   // print out the configuration
   {
+    TINYAD_DEBUG_OUT("Diff flag: " << diff);
+    TINYAD_DEBUG_OUT("*Eigenvalue Differentiable filtering strategy: " << diff_mode_str);
     TINYAD_DEBUG_OUT("Eigenvalue filtering strategy: " << eps_str);
     TINYAD_DEBUG_OUT("mu: " << MU);
     TINYAD_DEBUG_OUT("lambda: " << LAMBDA);
-    TINYAD_DEBUG_OUT("Projection threshold: " << eps);
+    TINYAD_DEBUG_OUT("*Projection threshold: " << eps);
     TINYAD_DEBUG_OUT("Mesh name: " << mesh_name);
     TINYAD_DEBUG_OUT("Pose label: " << pose_label);
     TINYAD_DEBUG_OUT("Lambda / Mu ratio: " << lambda_mu_ratio);
@@ -197,9 +276,6 @@ int main(int argc, char** argv)
     TINYAD_DEBUG_OUT("Trust region threshold: " << tr_threshold);
     TINYAD_DEBUG_OUT("Experiment folder: " << experiment_folder);
     TINYAD_DEBUG_OUT("Rotate ratio: " << rotate_ratio);
-    TINYAD_DEBUG_OUT("delta, transition_width of diff: " << delta);
-    TINYAD_DEBUG_OUT("beta, smoothing_param of diff: " << beta);
-    
   }
 
   Eigen::MatrixXd V, U; // #V-by-3 3D vertex positions
@@ -350,18 +426,19 @@ int main(int argc, char** argv)
         igl::writeMESH(output_folder + "obj/" + mesh_name + "_" + eps_str + "/" + output_tag + "_iter_" + std::to_string(i) + ".mesh", U, F, FF);
       
         // switch between clamp or abs depending on whether the trust region ratio is close to 1
-        if(eps_str == "adaptive") {
+        //if(eps_str == "adaptive") {
+        if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_NONDIFF) {
           eps = (std::fabs(hist_trust_region_ratio.back() - 1.0) < tr_threshold) ? 0.0 : -1; // tr_threshold信赖域接受步长的阈值，通常设置为0.01,大于接受
 
           if (eps == 0.0) {
-            TINYAD_DEBUG_OUT("Switch to clamp");
+            TINYAD_DEBUG_OUT("Switch to clamp");  
           }
           else {
             TINYAD_DEBUG_OUT("Switch to abs");
           }
           hist_trust_region_eps.push_back(eps);
         }
-        auto [f, g, H_proj] = func.eval_with_hessian_proj(x, eps); // 
+        auto [f, g, H_proj] = func.eval_with_hessian_proj(x, eps, _diff_mode); // 
         Eigen::SparseMatrix<double> H0 = func.eval_hessian(x); // 计算未投影的Hessian，用于后续计算牛顿下降量和牛顿下降量
 
         // record the energy
@@ -459,6 +536,7 @@ int main(int argc, char** argv)
         output_file_iter << (hist.size()-1) << std::endl;
       }
 
+      TINYAD_DEBUG_OUT("======== The End ========");
       // comment this out later
       // close the viewer
       exit(0);
@@ -490,5 +568,10 @@ int main(int argc, char** argv)
     optimization_thread.join();
   }
 
+  #if DEBUG_OUTPUT
+    TINYAD_CLOSE_DEBUG_LOG();
+  #endif
   return 0;
 }
+
+

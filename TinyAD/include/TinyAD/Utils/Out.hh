@@ -34,6 +34,15 @@ namespace TinyAD
     std::cout << TINYAD_ANSI_FG_GREEN << str << TINYAD_ANSI_RESET << std::endl; \
     std::cout.flush(); \
 }
+// 定义全局文件流
+static std::ofstream debug_log_file;
+// 初始化函数（在程序开始时调用）
+#define TINYAD_INIT_DEBUG_LOG(filename) \
+    TinyAD::debug_log_file.open(filename, std::ios::app)
+
+// 关闭函数（在程序结束时调用）
+#define TINYAD_CLOSE_DEBUG_LOG() \
+    if (TinyAD::debug_log_file.is_open()) TinyAD::debug_log_file.close()
 
 #define TINYAD_DEBUG_OUT(str) \
 { \
@@ -42,11 +51,21 @@ namespace TinyAD
               << str \
               << TINYAD_ANSI_RESET << std::endl; \
     std::cout.flush(); \
+    if (TinyAD::debug_log_file.is_open()) \
+    { \
+        TinyAD::debug_log_file << "[DEBUG] " << str << std::endl; \
+        TinyAD::debug_log_file.flush(); \
+    } \
 }
 
 #define TINYAD_DEBUG_VAR(var) \
 { \
     TINYAD_DEBUG_OUT(#var << " = " << var) \
+    if (TinyAD::debug_log_file.is_open()) \
+    { \
+        TinyAD::debug_log_file << #var << " = " << var<< std::endl; \
+        TinyAD::debug_log_file.flush(); \
+    } \
 }
 
 #define TINYAD_WARNING(str) \
@@ -59,22 +78,46 @@ namespace TinyAD
               << " in file " << __FILE__ << ")" \
               << std::endl; \
     std::cout.flush(); \
+    if (TinyAD::debug_log_file.is_open()) \
+    { \
+        TinyAD::debug_log_file << "[WARNING] " << str \
+                       << " (in function " << __FUNCTION__ << ":" << __LINE__ \
+                       << " in file " << __FILE__ << ")" \
+                       << std::endl; \
+        TinyAD::debug_log_file.flush(); \
+    } \
 }
 
 #define TINYAD_ERROR(str) \
+{ \
     std::cout << TINYAD_ANSI_FG_RED \
               << "[ERROR] " \
               << str \
               << TINYAD_ANSI_RESET \
               << " (in function " << __FUNCTION__ << ":" << __LINE__ \
               << " in file " << __FILE__ << ")" \
-              << std::endl
+              << std::endl;\
+    if (TinyAD::debug_log_file.is_open()) \
+    { \
+        TinyAD::debug_log_file << "[ERROR] " << str \
+                       << " (in function " << __FUNCTION__ << ":" << __LINE__ \
+                       << " in file " << __FILE__ << ")" \
+                       << std::endl; \
+        TinyAD::debug_log_file.flush(); \
+    } \
+}
 
 #define TINYAD_ERROR_throw(st) \
 { \
     TINYAD_ERROR(st); \
     std::stringstream str_strm; \
     str_strm << "[ERROR] " << st; \
+    if (TinyAD::debug_log_file.is_open()) \
+    { \
+        TinyAD::debug_log_file << "[ERROR] " << st \
+                       << std::endl; \
+        TinyAD::debug_log_file.flush(); \
+    } \
     throw std::runtime_error(str_strm.str()); \
 }
 

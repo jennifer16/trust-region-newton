@@ -3,3 +3,7 @@ build
 results/*
 buildr
 temp/*
+myscripts/*
+myexperiments/*
+logs/*
+debug_log/*

@@ -156,12 +156,20 @@ struct ScalarFunction
      * Evaluate function with gradient and Hessian.
      * The returned Hessian matrix is positive-definite (via per-element projection).
      */
+//     void eval_with_hessian_proj(
+//             const Eigen::VectorX<PassiveT>& _x,
+//             PassiveT& _f,
+//             Eigen::VectorX<PassiveT>& _g,
+//             Eigen::SparseMatrix<PassiveT>& _H_proj,
+//             const PassiveT& _projection_eps = default_hessian_projection_eps) const;
+    
     void eval_with_hessian_proj(
             const Eigen::VectorX<PassiveT>& _x,
             PassiveT& _f,
             Eigen::VectorX<PassiveT>& _g,
             Eigen::SparseMatrix<PassiveT>& _H_proj,
-            const PassiveT& _projection_eps = default_hessian_projection_eps) const;
+            const PassiveT& _projection_eps = default_hessian_projection_eps,
+            HessianProjectionMode _mode = HessianProjectionMode::AUTO) const;
 
     /**
      * Evaluate function with gradient and Hessian.
@@ -170,9 +178,23 @@ struct ScalarFunction
     std::tuple<PassiveT, Eigen::VectorX<PassiveT>, Eigen::SparseMatrix<PassiveT>>
     eval_with_hessian_proj(
             const Eigen::VectorX<PassiveT>& _x,
-            const PassiveT& _projection_eps = default_hessian_projection_eps) const;
+            const PassiveT& _projection_eps = default_hessian_projection_eps,
+            HessianProjectionMode _mode = HessianProjectionMode::AUTO) const;
 
-    /**
+    
+//     // 设置所有目标项的投影模式
+//     void set_projection_mode(HessianProjectionMode mode) {
+//         for (auto& term : objective_terms_) {
+//             // 需要动态转换，因为基类没有 set_projection_mode 方法
+//             if (auto* derived = dynamic_cast<
+//                 ScalarObjectiveTerm<variable_dimension, /*...其他模板参数...*/>*>(term.get())) {
+//                 derived->set_projection_mode(mode);
+//             }
+//         }
+//     }
+    
+    
+        /**
      * Change settings before calling eval(..).
      *
      * Example:
