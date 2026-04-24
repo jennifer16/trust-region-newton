@@ -9,7 +9,6 @@ template<typename T>
 class EigenvalueRegularizer {
 public:
     
-    
     EigenvalueRegularizer(T eps = T(0), HessianProjectionMode m = HessianProjectionMode::AUTO, T smooth = T(0)) 
         : epsilon(eps), mode(m), smoothness(smooth) {
         // 自动设置平滑参数
@@ -32,7 +31,6 @@ public:
                 return clamp_regularize(lambda);
             case HessianProjectionMode::SOFT_CLAMP:
                 return soft_clamp_regularize(lambda);
-            
             case HessianProjectionMode::ABS:
                 return abs_regularize(lambda);
             case HessianProjectionMode::SOFT_ABS:
@@ -47,6 +45,9 @@ public:
             //nondiff版本：直接clamp或abs，没有平滑过渡
             case HessianProjectionMode::CLAMP_ABS_NONDIFF:
                 return clamp_abs_regularize_nondiff(lambda);
+            case HessianProjectionMode::ABS_SHIFT_CLAMP_NONDIFF:
+                return abs_shift_clamp_regularize(lambda);
+                //return clamp_abs_regularize_nondiff(lambda);
             case HessianProjectionMode::ABS_NONDIFF:
                 return abs_regularize_nondiff(lambda);
             case HessianProjectionMode::CLAMP_NONDIFF:
@@ -57,16 +58,17 @@ public:
         }
     }
     
-    // 检查是否需要正则化
+    // 检查lambda是否需要正则化
     bool needs_regularization(T lambda) const {
         
         switch (mode) {
+            case HessianProjectionMode::ABS_SHIFT_CLAMP_NONDIFF:
             case HessianProjectionMode::CLAMP_ABS_NONDIFF:
                 if (epsilon < T(0)) {
                     // epsilon < 0: abs 模式
                     return lambda < T(0); // 直接复用ABS的非可微版本的判断条件
                 } else {
-                    // epsilon > 0: 软 clamp
+                    // epsilon >= 0: 软 clamp
                     return lambda < epsilon ;
                 }
             // case HessianProjectionMode::AUTO:
@@ -131,6 +133,27 @@ private:
             // return abs_regularize(lambda);
         }
     }
+
+     // Clamp+Abs 策略：负值做 abs，小正值 clamp 到 epsilon
+    T abs_shift_clamp_regularize(T lambda) const {
+        if (epsilon < T(0)) {
+            // project to absolute value
+            if (lambda < T(0))
+            {
+                lambda = -lambda;
+                //return -lambda;
+            }
+        }
+        else {
+            // project to epsilon
+            if (lambda < epsilon)
+            {
+                lambda = epsilon;
+                //return epsilon;
+            }
+        }
+        return lambda;
+    }
     
     // 软 Clamp 策略：所有小于 epsilon 的值都平滑上升到 epsilon
     T soft_clamp_regularize(T lambda) const {
@@ -148,6 +171,10 @@ private:
     // 和 trust region paper 中提到的非可微分clamping方法一致
     T clamp_regularize(T lambda) const {
         return std::max(lambda, epsilon);
+    }
+
+    T shift_regularize(T lambda) const {
+        return (lambda + epsilon -1);
     }
     
     // 混合策略：结合多种方法
@@ -220,12 +247,12 @@ private:
 
     T clamp_abs_regularize_nondiff(T lambda) const {
         
-        #if DEBUG_OUTPUT
-            TINYAD_DEBUG_OUT("*in clamp_abs_regularize_nondiff(): lambda(old)=" << static_cast<double>(lambda));
-            TINYAD_DEBUG_VAR(static_cast<double>(epsilon));
-            //TINYAD_DEBUG_OUT("*in clamp_abs_regularize_nondiff(): epsilon=" << static_cast<double>(epsilon) ); 
+        // #if DEBUG_OUTPUT
+        //     TINYAD_DEBUG_OUT("*in clamp_abs_regularize_nondiff(): lambda(old)=" << static_cast<double>(lambda));
+        //     TINYAD_DEBUG_VAR(static_cast<double>(epsilon));
+        //     //TINYAD_DEBUG_OUT("*in clamp_abs_regularize_nondiff(): epsilon=" << static_cast<double>(epsilon) ); 
         
-        #endif
+        // #endif
 
         if (epsilon < T(0)) {
             // project to absolute value
@@ -243,10 +270,10 @@ private:
                 //return epsilon;
             }
         }
-        #if DEBUG_OUTPUT
-            TINYAD_DEBUG_VAR(static_cast<double>(lambda));
-            //TINYAD_DEBUG_OUT("*in clamp_abs_regularize_nondiff(): lambda(new)=" << static_cast<double>(lambda));
-        #endif
+        // #if DEBUG_OUTPUT
+        //     //TINYAD_DEBUG_VAR(static_cast<double>(lambda));
+        //     TINYAD_DEBUG_OUT("*in clamp_abs_regularize_nondiff(): lambda(new)=" << static_cast<double>(lambda));
+        // #endif
 
         return lambda;       
     }

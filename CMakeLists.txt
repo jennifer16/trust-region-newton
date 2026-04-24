@@ -3,7 +3,13 @@ project(example)
 
 list(PREPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
+# 4. 查找系统 GTest (必需)
+find_package(GTest REQUIRED)
+#  find_package(GMock QUIET)  # 可选
+message(STATUS "Found GTest: ${GTEST_INCLUDE_DIRS}")
+
 # Libigl
+
 include(libigl)
 
 # Enable the target igl::glfw
@@ -44,3 +50,31 @@ target_compile_definitions(${PROJECT_NAME} PUBLIC SOURCE_PATH="${CMAKE_CURRENT_S
 target_link_libraries(${PROJECT_NAME} PUBLIC igl::glfw TinyAD)
 # tinyad needs C++17 (not sure if that means this project does too)
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_17)
+
+# # # 添加 STB 支持
+# # target_compile_definitions(recorder PRIVATE STB_IMAGE_WRITE_IMPLEMENTATION)
+# # target_include_directories(recorder PRIVATE /usr/local/include)
+# # 确保能找到头文件
+# target_include_directories(example PRIVATE
+#     /usr/local/include
+#     ${CMAKE_BINARY_DIR}/_deps/libigl-src/include
+# )
+
+# # 如果没有安装GTest，自动下载
+# include(FetchContent)
+# FetchContent_Declare(
+#     googletest
+#     GIT_REPOSITORY https://github.com/google/googletest.git
+#     GIT_TAG release-1.12.1
+# )
+
+# FetchContent_MakeAvailable(googletest)
+
+
+# 根据选项添加其他目录
+option(BUILD_TESTING "Build tests" ON)
+
+if(BUILD_TESTING)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
