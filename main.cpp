@@ -1824,6 +1824,8 @@ int shear_reg_projected_newton(int argc, char** argv)
       Eigen::VectorXd d;
       Eigen::SparseMatrix<double> H;
       std::vector<double> hist;
+      Eigen::VectorXd x0(x.size()) ;
+      x0.setZero();
       // record the trust region ratio
       // 衡量模型预测的准确性 ρ = (实际下降) / (预测下降), 
       // ρ < 0         → 实际目标函数值增加（拒绝步长）
@@ -1840,8 +1842,10 @@ int shear_reg_projected_newton(int argc, char** argv)
       std::vector<double> hist_line_search_alpha; // 记录每次迭代的线搜索步长
       std::vector<int> hist_line_search_iter; // 记录每次迭代的线搜索迭代次数
 
-      std::vector<double> hist_energy_injection_ratio;
-      hist_energy_injection_ratio.push_back(0.0);
+      std::vector<double> hist_energy_injection_ratio1;
+      hist_energy_injection_ratio1.push_back(0.0);
+      std::vector<double> hist_energy_injection_ratio2;
+      hist_energy_injection_ratio2.push_back(0.0);
 
       //double cubic_sigma = 0.0;
       //Eigen::VectorXd cubic_lambda_vec = Eigen::VectorXd::Zero();
@@ -2012,6 +2016,11 @@ int shear_reg_projected_newton(int argc, char** argv)
         auto [f, g, H_proj] = func.eval_with_hessian_proj(x, eps, _diff_mode); // 
         Eigen::SparseMatrix<double> H0 = func.eval_hessian(x); // 计算未投影的Hessian，用于后续计算牛顿下降量和牛顿下降量
 
+        double prev_energy = 0;
+        if (hist.empty() == false)
+        {
+            prev_energy = hist.back();
+        }
         // record the energy
         hist.push_back(f);
 
@@ -2074,15 +2083,20 @@ int shear_reg_projected_newton(int argc, char** argv)
         TINYAD_DEBUG_OUT("Trust region ratio: " << trust_region_ratio);
 
         //能量注入
-        double energy_inj = x.transpose() * (H_proj - H0)* x;
+        Eigen::VectorXd delta_x = x - x0 ;
+        double energy_proj = delta_x.transpose() * (H_proj  * delta_x) ;
+        double energy_orig = delta_x.transpose() * (H0  * delta_x );
+        double energy_inj = energy_proj - energy_orig;
+        
+        hist_energy_injection_ratio1.push_back(energy_inj/(prev_energy+1e-8));
+        TINYAD_DEBUG_OUT("Energy injected, energy injected ratio: " << energy_inj <<","<< hist_energy_injection_ratio1.back());
         double total_energy = hist.back();
-        if (total_energy < 1e-8)
-        {
-          total_energy  +=  1e-8; 
-        }
-        hist_energy_injection_ratio.push_back(energy_inj/total_energy);
-        TINYAD_DEBUG_OUT("Energy injected, energy injected ratio: " << energy_inj <<","<< hist_energy_injection_ratio.back());
+        // double total_energy = 0;
+        double energy_descrease = prev_energy - total_energy;
+        hist_energy_injection_ratio2.push_back(energy_descrease/(prev_energy+1e-8));
+        TINYAD_DEBUG_OUT("Energy decreased, energy descrease ratio: " << energy_descrease <<","<< hist_energy_injection_ratio2.back());
 
+        x0 = x;
 
         // if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING2)
         // {
@@ -2145,9 +2159,13 @@ int shear_reg_projected_newton(int argc, char** argv)
         std::ostream_iterator<int> output_iterator_line_search_iter(output_file_line_search_iter, "\n");
         std::copy(std::begin(hist_line_search_iter), std::end(hist_line_search_iter), output_iterator_line_search_iter);
 
-        std::ofstream output_file_energy_injection(output_folder + "energy_injection/" + output_tag + ".txt");
-        std::ostream_iterator<int> output_energy_injection(output_file_energy_injection, "\n");
-        std::copy(std::begin(hist_energy_injection_ratio), std::end(hist_energy_injection_ratio), output_energy_injection);
+        std::ofstream output_file_energy_injection1(output_folder + "energy_injection1/" + output_tag + ".txt");
+        std::ostream_iterator<int> output_energy_injection1(output_file_energy_injection1, "\n");
+        std::copy(std::begin(hist_energy_injection_ratio1), std::end(hist_energy_injection_ratio1), output_energy_injection1);
+
+        std::ofstream output_file_energy_injection2(output_folder + "energy_injection2/" + output_tag + ".txt");
+        std::ostream_iterator<int> output_energy_injection2(output_file_energy_injection2, "\n");
+        std::copy(std::begin(hist_energy_injection_ratio2), std::end(hist_energy_injection_ratio2), output_energy_injection2);
 
 
         std::ofstream output_file_iter(output_folder + "iter/" + output_tag + ".txt");
@@ -2171,7 +2189,7 @@ int shear_reg_projected_newton(int argc, char** argv)
       
       // 使用
       const std::string results_file_csv = "../results/results_compare.csv";
-
+      
       CSVLineBuilder builder;
       builder.add(arr_time_str)
             .add(arr_mesh_name)
@@ -2187,8 +2205,10 @@ int shear_reg_projected_newton(int argc, char** argv)
             .add(arr_iter)
             .add(hist) //energy
             .add(hist_line_search_iter)
-            .add(hist_energy_injection_ratio)
+            .add(hist_energy_injection_ratio1)
+            .add(hist_energy_injection_ratio2)
             .writeToFile(results_file_csv, true);  // true表示换行
+      
 
       TINYAD_DEBUG_OUT("======== The End ========");
       // comment this out later
@@ -2258,6 +2278,7 @@ int shear_reg_projected_newton(int argc, char** argv)
       std::filesystem::create_directory(output_folder + "frames");
 
   std::string title = experiment_folder.erase(0,7).erase(experiment_folder.size()-15)+ "_" + diff_mode_str.c_str();
+  title += "_" + std::to_string(deformation_ratio) + "_" + std::to_string(rotate_ratio)+ "_" + std::to_string(deformation_magnitude);
 
   viewer.callback_pre_draw = [&] (igl::opengl::glfw::Viewer& viewer)
   {

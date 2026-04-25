@@ -148,7 +148,8 @@ void setup_initial_deformation(const Eigen::MatrixXd V,
   }
   else if (pose_label == "shear_top_percentage") {
     for (int i = 0; i < topmost_vertices.size(); ++i) {
-      U(topmost_vertices[i], 0) += deformation_ratio * x_range * y_range * 0.5;
+      // U(topmost_vertices[i], 0) += deformation_ratio * x_range * y_range * 0.5;
+      U(topmost_vertices[i], 0) += deformation_ratio  * y_range ;
     }
   }
   else if (pose_label == "stretch_shear") {
