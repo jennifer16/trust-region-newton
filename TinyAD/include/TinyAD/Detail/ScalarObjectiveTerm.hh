@@ -51,6 +51,10 @@ struct ScalarObjectiveTermBase
     virtual HessianProjectionMode get_projection_mode() const {
         return HessianProjectionMode::AUTO;
     }
+
+    //约束处理 zj
+    virtual void set_fixed_dofs(const std::vector<bool>& _is_fixed) {}
+
 };
 
 /**
@@ -101,6 +105,8 @@ struct ScalarObjectiveTerm : ScalarObjectiveTermBase<PassiveT>
         eval_element_passive = _eval_element;
         eval_element_active_first_order = _eval_element;
         eval_element_active_second_order = _eval_element;
+
+        // is_fixed_global = nullptr;
     }
 
     PassiveT eval(
@@ -183,19 +189,171 @@ struct ScalarObjectiveTerm : ScalarObjectiveTermBase<PassiveT>
             elements[i_element] = ActiveSecondOrderElementType(element_handles[i_element], _x);
             element_results[i_element] = eval_element_active_second_order(elements[i_element]);
 
-            if (_project_hessian)
+            //to do, 特征值为负的时候再修正
+            Eigen::MatrixXd element_Hess = element_results[i_element].Hess;
+            auto b_positive = positive_diagonally_dominant<PassiveT>(element_Hess, _projection_eps);
+            
+            if (_project_hessian && (!b_positive)) //非正定
             {
-                #ifdef DIFF_PROJECTED_NEWTON
-                    // #if DEBUG_OUTPUT
-                    // //TINYAD_DEBUG_OUT("Projection mode in eval_with_derivatives_add: " << static_cast<int>(get_projection_mode())); 
-                    // #endif
-                    project_positive_definite_diff<n_element, PassiveT>(element_results[i_element].Hess, _projection_eps, get_projection_mode());
-                #else       
-                    // project_positive_definite_with_inv_g<n_element, PassiveT>(element_results[i_element].Hess, element_results[i_element].grad, _projection_eps);
-                    project_positive_definite<n_element, PassiveT>(element_results[i_element].Hess, _projection_eps);
-                #endif
+                auto &H_local = element_results[i_element].Hess;
+                const auto& idx_local_to_global = elements[i_element].idx_local_to_global;
+                if (is_fixed_global != nullptr) 
+                {
+                    // === 策略 B：只在自由子空间修正 ===
+                    auto& H_local = element_results[i_element].Hess;
+                    std::vector<Eigen::Index> free_local = get_free_local_indices(idx_local_to_global);
+                    int n_free = free_local.size();
+                    int n_all = idx_local_to_global.size();
+
+                    // TINYAD_DEBUG_OUT("modify partial free element: " << i_element); 
+                    // TINYAD_DEBUG_OUT("n_free: " << n_free); 
+
+                    if (n_free > 0 && n_free < n_all) { // 混合单元：提取自由子块
+                        Eigen::MatrixX<PassiveT> H_AA(n_free, n_free);
+                        for (int i = 0; i < n_free; ++i)
+                            for (int j = 0; j < n_free; ++j)
+                                H_AA(i, j) = H_local(free_local[i], free_local[j]);
+                          
+                        // if (i_element == 660 // free 3
+                        //     || i_element == 663   
+                        //     || i_element == 661   // free 6
+                        //     || i_element == 1
+                        //     || i_element == 2 // free 9
+                        //     || i_element == 924) 
+                        if (i_element == 660 ) 
+                        {
+                            TINYAD_DEBUG_OUT("modify partial free element: " << i_element); 
+                            TINYAD_DEBUG_OUT("n_free: " << n_free); 
+                            TINYAD_DEBUG_OUT("H_local(original): " << element_results[i_element].Hess); 
+                        }
+                        // // 对 H_AA 做修正
+                        // #ifdef DIFF_PROJECTED_NEWTON
+                        //     project_positive_definite_diff<PassiveT>(H_AA, _projection_eps, get_projection_mode());
+                        // #else
+                        //     project_positive_definite<PassiveT>(H_AA, _projection_eps);
+                        // #endif
+                        // 替换掉对 project_positive_definite_diff 的调用
+                        // 自己调用 project_positive_definite 的运行期版本（如果存在的话）
+
+                        // 或者直接对 H_AA 做特征分解和修正
+                        Eigen::SelfAdjointEigenSolver<Eigen::MatrixX<PassiveT>> eigensolver(H_AA);
+                        Eigen::VectorX<PassiveT> eigenvalues = eigensolver.eigenvalues();
+                        const auto& eigenvectors = eigensolver.eigenvectors();
+                        
+
+                        auto mode  = get_projection_mode();
+                        
+                        if (mode == HessianProjectionMode::ABS_NONDIFF)
+                        {
+                            for (int k = 0; k < eigenvalues.size(); ++k) {
+                                if (eigenvalues[k] < 0) {
+                                    eigenvalues[k] = -eigenvalues[k];  // abs
+                                }
+                            }
+                        }
+                        else if (mode == HessianProjectionMode::CLAMP_ABS_NONDIFF
+                            || mode == HessianProjectionMode::CLAMP_ABS_BLENDING)
+                        {
+                            if (_projection_eps < 0)
+                            {
+                                for (int k = 0; k < eigenvalues.size(); ++k) {
+                                    if (eigenvalues[k] < 0) {
+                                        eigenvalues[k] = -eigenvalues[k];  // abs
+                                    }   
+                                }
+                            }
+                            else
+                            {
+                                for (int k = 0; k < eigenvalues.size(); ++k) {
+                                    if (eigenvalues[k] < 0) {
+                                        eigenvalues[k] = 0;  // clamp
+                                    }   
+                                }
+                            }
+                            
+                        }
+                        else // clamp
+                        {
+                            for (int k = 0; k < eigenvalues.size(); ++k) {
+                                if (eigenvalues[k] < 0) {
+                                    eigenvalues[k] = 0;  
+                                }   
+                            }
+                        }
+                        
+                        H_AA = eigenvectors * eigenvalues.asDiagonal() * eigenvectors.transpose();
+                        H_AA = 0.5 * (H_AA + H_AA.transpose());  // 对称化
+                    
+                        // 嵌入回去
+                        for (int i = 0; i < n_free; ++i)
+                            for (int j = 0; j < n_free; ++j)
+                                H_local(free_local[i], free_local[j]) = H_AA(i, j);
+
+                        // if (i_element == 660 // free 3
+                        //     || i_element == 663   
+                        //     || i_element == 661   // free 6
+                        //     || i_element == 1
+                        //     || i_element == 2 // free 9
+                        //     || i_element == 924) 
+                        if (i_element == 660 ) 
+                        { 
+                            TINYAD_DEBUG_OUT("modify partial free element: " << i_element); 
+                            TINYAD_DEBUG_OUT("n_free: " << n_free); 
+                            TINYAD_DEBUG_OUT("H_local(modified): " << element_results[i_element].Hess); 
+                        }
+                                
+                    } 
+                    else if (n_free == n_all) //全free
+                    {
+                        #ifdef DIFF_PROJECTED_NEWTON
+                            // #if DEBUG_OUTPUT
+                            // //TINYAD_DEBUG_OUT("Projection mode in eval_with_derivatives_add: " << static_cast<int>(get_projection_mode())); 
+                            // #endif
+                            project_positive_definite_diff<n_element, PassiveT>(element_results[i_element].Hess, _projection_eps, get_projection_mode());
+                        #else       
+                            // project_positive_definite_with_inv_g<n_element, PassiveT>(element_results[i_element].Hess, element_results[i_element].grad, _projection_eps);
+                            project_positive_definite<n_element, PassiveT>(element_results[i_element].Hess, _projection_eps);
+                        #endif
+                    }
+                    //全fixed,不修正，后续会被清0
+                    
+                }
+                else 
+                {
+                    #ifdef DIFF_PROJECTED_NEWTON
+                        // if (i_element == 660 // free 3
+                        //     || i_element == 663   
+                        //     || i_element == 661   // free 6
+                        //     || i_element == 1
+                        //     || i_element == 2 // free 9
+                        //     || i_element == 924) 
+                        if (i_element == 660 )    
+                        {
+                            TINYAD_DEBUG_OUT("modify partial free element: " << i_element); 
+                            TINYAD_DEBUG_OUT("H_local(original): " << element_results[i_element].Hess); 
+                        }
+                        project_positive_definite_diff<n_element, PassiveT>(element_results[i_element].Hess, _projection_eps, get_projection_mode());
+                    
+                        // if (i_element == 660 // free 3
+                            // || i_element == 663   
+                            // || i_element == 661   // free 6
+                            // || i_element == 1
+                            // || i_element == 2 // free 9
+                            // || i_element == 924) 
+                        if (i_element == 660 ) 
+                        {
+                            TINYAD_DEBUG_OUT("modify partial free element: " << i_element); 
+                            TINYAD_DEBUG_OUT("H_local(modified): " << element_results[i_element].Hess); 
+                        }
+
+                    #else       
+                        // project_positive_definite_with_inv_g<n_element, PassiveT>(element_results[i_element].Hess, element_results[i_element].grad, _projection_eps);
+                        project_positive_definite<n_element, PassiveT>(element_results[i_element].Hess, _projection_eps);
+                    #endif
+                }
+               
             }
-                
+               
             // Assert that derivatives are finite
             TINYAD_ASSERT_FINITE_MAT(element_results[i_element].grad);
             TINYAD_ASSERT_FINITE_MAT(element_results[i_element].Hess);
@@ -233,6 +391,32 @@ struct ScalarObjectiveTerm : ScalarObjectiveTermBase<PassiveT>
         return projection_mode_;
     }
 
+    // 处理约束顶点zj
+    
+
+    void set_fixed_dofs(const std::vector<bool>& _is_fixed) override {
+        is_fixed_global = &_is_fixed;
+    }
+
+    // 提取自由局部索引的辅助函数
+    std::vector<Eigen::Index> get_free_local_indices(
+        const std::vector<Eigen::Index>& idx_local_to_global) const
+    {
+        std::vector<Eigen::Index> free_local;
+        if (is_fixed_global != nullptr)
+        {
+            for (Eigen::Index local_i = 0; local_i < (Eigen::Index)idx_local_to_global.size(); ++local_i) {
+                Eigen::Index global_i = idx_local_to_global[local_i];
+                if (global_i < (*is_fixed_global).size()
+                && !(*is_fixed_global)[global_i]) {
+                    free_local.push_back(local_i);
+                }
+            }
+        }
+        
+        return free_local;
+    }
+
 private:
     const Eigen::Index n_vars_global;
 
@@ -241,6 +425,8 @@ private:
 
     // 新增：投影模式成员变量
     HessianProjectionMode projection_mode_ = HessianProjectionMode::AUTO;
+    // 新增：全局固定自由度标记的引用
+    const std::vector<bool>* is_fixed_global = nullptr;
 
     // Instantiations of user-provided lambda
     PassiveEvalElementFunction eval_element_passive;
@@ -248,4 +434,4 @@ private:
     ActiveSecondOrderEvalElementFunction eval_element_active_second_order;
 };
 
-}
+};

@@ -1518,9 +1518,10 @@ int shear_reg_projected_newton(int argc, char** argv)
     ("tr", "trust region ratio threshold", cxxopts::value<double>()->default_value("0.01"))
     ("experiment_name", "experiment name", cxxopts::value<std::string>()->default_value(""))
     ("rotate_ratio", "The ratio of the rotation", cxxopts::value<double>()->default_value("0.5"))
-    ("h,help", "show help")
     ("adaptive", "adaptive according to rho ", cxxopts::value<double>()->default_value("1e-5")) // >0 为adaptive
-  ;
+    ("enable_constraint", "enable constraints processing ", cxxopts::value<bool>()->default_value("false")) // 若设置diff，---
+    ("h,help", "show help")
+    ;
   
   auto result = options.parse(argc, argv);
   if (result.count("help"))
@@ -1543,6 +1544,8 @@ int shear_reg_projected_newton(int argc, char** argv)
   // double delta = std::stod(delta_str);
   // std::string beta_str = result["beta"].as<std::string>();
   // double beta = std::stod(beta_str);
+
+  const bool enable_constraint = result["enable_constraint"].as<bool>();
 
 
   const bool abs = result["abs"].as<bool>();
@@ -1697,6 +1700,8 @@ int shear_reg_projected_newton(int argc, char** argv)
     TINYAD_DEBUG_OUT("Experiment folder: " << experiment_folder);
     TINYAD_DEBUG_OUT("Rotate ratio: " << rotate_ratio);
     TINYAD_DEBUG_OUT("Adaptive method: " << adaptive);
+    TINYAD_DEBUG_OUT("enable_constraint: " << enable_constraint);
+    
   }
 
   Eigen::MatrixXd V, U; // #V-by-3 3D vertex positions,V为初始,U为当前
@@ -1800,6 +1805,26 @@ int shear_reg_projected_newton(int argc, char** argv)
           auto W = mu / 2.0 * (Ic - 3.0) + lambda / 2.0 * (detF - alpha) * (detF - alpha);
           return A * W;
       });
+
+      //约束处理 zj
+      // 构建全局固定自由度标记
+      std::vector<bool> is_fixed_global(3 * V.rows(), false);
+      if (enable_constraint)
+      {
+        // TINYAD_DEBUG_OUT("enable_constraint: " << enable_constraint);
+        TINYAD_DEBUG_OUT("number of fixed vertices: " << indices_fixed.size());
+
+        for (int idx : indices_fixed) {
+            is_fixed_global[3*idx + 0] = true;
+            is_fixed_global[3*idx + 1] = true;
+            is_fixed_global[3*idx + 2] = true;
+        }
+        func.set_fixed_dofs(is_fixed_global);
+      }
+      
+
+      // 将这个信息传递给 ScalarObjectiveTerm
+      // 需要 TinyAD 暴露一个接口，或者通过 func 的底层访问
 
       // to be optimized by zj: 可以考虑把 rest_shapes 以及 pre-computed Mr.inverse() 放到外边，作为常量传入 lambda 函数中，这样就不需要每次迭代都计算 rest_shapes 和 Mr.inverse() 了
       // to be optimized by zj: 还可以考虑把 A 也放到外边，因为 A 只和 rest_shapes 相关，而 rest_shapes 是不变的
@@ -2023,6 +2048,7 @@ int shear_reg_projected_newton(int argc, char** argv)
         }
         // record the energy
         hist.push_back(f);
+        
 
         TINYAD_DEBUG_OUT("Energy in iteration " << i << ": " << f);
 

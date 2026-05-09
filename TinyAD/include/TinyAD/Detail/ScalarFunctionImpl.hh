@@ -306,7 +306,7 @@ eval_with_hessian_proj(
         PassiveT& _f,
         Eigen::VectorX<PassiveT>& _g,
         Eigen::SparseMatrix<PassiveT>& _H_proj,
-        const PassiveT& _projection_eps,HessianProjectionMode _mode ) const
+        const PassiveT& _projection_eps, HessianProjectionMode _mode ) const
 {
     TINYAD_ASSERT_EQ(_x.size(), n_vars);
 
@@ -369,6 +369,15 @@ auto scalar_function(
 
     return ScalarFunction<variable_dimension, PassiveT, VariableHandle>(
                 std::move(variable_handles), _settings);
+}
+
+//约束处理 zj
+template <int variable_dimension, typename PassiveT, typename VariableHandleT>
+void
+ScalarFunction<variable_dimension, PassiveT, VariableHandleT>::set_fixed_dofs(const std::vector<bool>& is_fixed) {
+    for (auto& term : objective_terms) {
+        term->set_fixed_dofs(is_fixed);
+    }
 }
 
 }

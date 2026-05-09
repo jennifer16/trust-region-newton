@@ -180,8 +180,9 @@ struct ScalarFunction
             const Eigen::VectorX<PassiveT>& _x,
             const PassiveT& _projection_eps = default_hessian_projection_eps,
             HessianProjectionMode _mode = HessianProjectionMode::AUTO) const;
+            
+    void set_fixed_dofs(const std::vector<bool>& is_fixed) ;
 
-    
 //     // 设置所有目标项的投影模式
 //     void set_projection_mode(HessianProjectionMode mode) {
 //         for (auto& term : objective_terms_) {
