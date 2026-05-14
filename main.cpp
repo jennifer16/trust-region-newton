@@ -1494,7 +1494,7 @@ int shear_projected_newton(int argc, char** argv)
 
 int shear_reg_projected_newton(int argc, char** argv)
 {
-  TINYAD_DEBUG_OUT("#shear_projected_newton " );
+  TINYAD_DEBUG_OUT("#shear_projected_newton" );
   // parse command line arguments
   cxxopts::Options options("Projected Newton with a trust region", "Choose eigenvalue filtering method: adaptive, clamp, abs");
 
@@ -2303,7 +2303,7 @@ int shear_reg_projected_newton(int argc, char** argv)
   if (!std::filesystem::exists(output_folder + "frames"))
       std::filesystem::create_directory(output_folder + "frames");
 
-  std::string title = experiment_folder.erase(0,7).erase(experiment_folder.size()-15)+ "_" + diff_mode_str.c_str();
+  std::string title = experiment_folder.erase(0,7).erase(experiment_folder.size()-15)+ "_" + diff_mode_str.c_str() ;
   title += "_" + std::to_string(deformation_ratio) + "_" + std::to_string(rotate_ratio)+ "_" + std::to_string(deformation_magnitude);
 
   viewer.callback_pre_draw = [&] (igl::opengl::glfw::Viewer& viewer)
@@ -2369,14 +2369,861 @@ int shear_reg_projected_newton(int argc, char** argv)
   return 0;
 }
  
+int fs_projected_newton_global(int argc, char** argv)
+{
+	TINYAD_DEBUG_OUT("fs_projected_newton_global() " );
+  // parse command line arguments
+  cxxopts::Options options("Projected Newton with a trust region", "Choose eigenvalue filtering method: adaptive, clamp, abs");
 
+  options.add_options()
+    ("smooth_mode", "add differentiable eigenvalue projection strategy ", cxxopts::value<std::string>()->default_value("none")) // 若设置diff，后续可微的clamp和abs等
+    ("diff", "add differentiable eigenvalue projection strategy ", cxxopts::value<bool>()->default_value("false")) // 若设置diff，后续可微的clamp和abs等
+    ("diff_mode", "differentiable eigenvalue projection mode", cxxopts::value<std::string>()->default_value("auto")) // 若设置diff，后续可微的clamp和abs等
+    ("abs", "use absolute eigenvalue projection strategy instead", cxxopts::value<bool>()->default_value("false"))
+    ("clamp", "use eigenvalue clamping strategy instead", cxxopts::value<bool>()->default_value("false"))
+    ("p,epsilon", "Projection threshold for the eigenvalue projection", cxxopts::value<std::string>()->default_value("-0.5"))
+    ("n,mesh_name", "Mesh name", cxxopts::value<std::string>()->default_value("bimba"))
+    ("l,pose_label", "Pose label", cxxopts::value<std::string>()->default_value("stretch"))
+    ("g,deformation_magnitude", "The magnitude of the deformation", cxxopts::value<double>()->default_value("2.0"))
+    ("t,deformation_ratio", "The ratio of the deformation", cxxopts::value<double>()->default_value("2.0"))
+    ("b,fixed_boundary_range", "The range of fixed vertices on the boundary", cxxopts::value<double>()->default_value("0.1"))
+    ("c,convergence_eps", "The convergence threshold", cxxopts::value<double>()->default_value("1e-5"))
+    ("ym", "Young's modulus (need to set both YM and PR to enable this option, otherwise lambda_mu_ratio is used instead)", cxxopts::value<double>()->default_value("1e8"))
+    ("pr", "Poisson's ratio (need to set both YM and PR to enable this option, otherwise lambda_mu_ratio is used instead)", cxxopts::value<double>()->default_value("0.495"))
+    ("tr", "trust region ratio threshold", cxxopts::value<double>()->default_value("0.01"))
+    ("experiment_name", "experiment name", cxxopts::value<std::string>()->default_value(""))
+    ("rotate_ratio", "The ratio of the rotation", cxxopts::value<double>()->default_value("0.5"))
+    ("adaptive", "adaptive according to rho ", cxxopts::value<double>()->default_value("1e-5")) // >0 为adaptive
+    ("enable_constraint", "enable constraints processing ", cxxopts::value<bool>()->default_value("false")) // 若设置diff，---
+    ("h,help", "show help")
+    ;
+  
+  auto result = options.parse(argc, argv);
+  if (result.count("help"))
+  {
+      std::cout << options.help() << "\n";
+      return 0;
+  }
+
+  std::string smooth_mode_str = result["smooth_mode"].as<std::string>();
+  unsigned int _smooth_mode = parse_smooth_mode(smooth_mode_str);
+  TINYAD_DEBUG_OUT("smooth flag: " << smooth_mode_str);
+  TINYAD_DEBUG_OUT("_smooth_mode: " << _smooth_mode);
+  if (_smooth_mode == 0) //非光滑模式
+  {
+    return shear_reg_projected_newton(argc, argv);
+  }
+
+  const bool diff = result["diff"].as<bool>();
+  std::string diff_mode_str = result["diff_mode"].as<std::string>();
+  TinyAD::HessianProjectionMode _diff_mode = parse_projection_mode(diff_mode_str);
+
+  const bool enable_constraint = result["enable_constraint"].as<bool>(); //obsolete
+
+  const bool abs = result["abs"].as<bool>();
+  const bool clamp = result["clamp"].as<bool>();
+  std::string eps_str = result["epsilon"].as<std::string>();
+  double eps = std::stod(eps_str);
+  std::string mesh_name = result["mesh_name"].as<std::string>();
+  std::string pose_label = result["pose_label"].as<std::string>();
+  const double deformation_magnitude = result["deformation_magnitude"].as<double>();
+  const double deformation_ratio = result["deformation_ratio"].as<double>();
+  const double fixed_boundary_range = result["fixed_boundary_range"].as<double>();
+  const double convergence_eps = result["convergence_eps"].as<double>();
+  const double YM = result["ym"].as<double>();
+  const double PR = result["pr"].as<double>();
+  const double tr_threshold = result["tr"].as<double>(); // 信赖域接受步长的阈值，通常设置为0.01
+  std::string experiment_folder = result["experiment_name"].as<std::string>() == "" ? ("figure_" + mesh_name) : result["experiment_name"].as<std::string>();
+  std::string time_str = get_time_str();
+  experiment_folder = experiment_folder + get_time_str();
+  const double rotate_ratio = result["rotate_ratio"].as<double>();
+  const double adaptive = result["adaptive"].as<double>();
+  /*
+  * 0: clamp
+  * -1: abs
+  * -0.5: adaptive (default)
+  * 0.5: differentiable  (if diff is set)
+  */
+  if (diff)
+  {
+      eps_str =  diff_mode_str;
+      //下面三种情况,eps值有特殊用处
+      if (_diff_mode == TinyAD::HessianProjectionMode::ABS_NONDIFF) {
+        eps_str = "abs";
+        eps = -1;
+      }
+      else if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_NONDIFF) {
+        eps_str = "clamp";
+        eps = 0;
+        //eps = TinyAD::EPS_1E_8;
+      }
+      else if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_NONDIFF) {
+      // || _diff_mode == TinyAD::HessianProjectionMode::ABS_SHIFT_CLAMP_NONDIFF) {
+        // set the default to adaptive
+        eps_str = "adaptive";
+        eps = -0.5;
+      }
+      else{
+         //非特殊情况,eps必须大于等于0
+        if (eps < 0)
+        {
+          eps = 0;
+          eps = TinyAD::EPS_1E_8;
+        }
+      }
+  }
+  else {
+    if (clamp || eps == 0) {
+        // we use eps = 0 as a flag for clamp projection, see lines 71-78 in our modified `TinyAD/include/TinyAD/Utils/HessianProjection.hh`
+        eps_str = "clamp";
+        eps = 0; 
+        diff_mode_str = "clamp_nondiff"; 
+        _diff_mode = TinyAD::HessianProjectionMode::CLAMP_NONDIFF; 
+    }
+    else if (abs || eps == -1) {
+        // we use eps = -1 as a flag for abs projection, see lines 71-78 in our modified `TinyAD/include/TinyAD/Utils/HessianProjection.hh`
+        eps_str = "abs";
+        eps = -1;
+        diff_mode_str = "abs_nondiff"; 
+        _diff_mode = TinyAD::HessianProjectionMode::ABS_NONDIFF; 
+    }
+    else {
+        // set the default to adaptive
+        eps_str = "adaptive";
+        eps = -0.5;
+        diff_mode_str = "clamp_abs_nondiff"; // trust region newton;
+        _diff_mode = TinyAD::HessianProjectionMode::CLAMP_ABS_NONDIFF;
+    }
+  }
+    
+  if (!std::filesystem::exists("../results/"))
+    std::filesystem::create_directory("../results/");
+  if (!std::filesystem::exists("../results/" + experiment_folder))
+    std::filesystem::create_directory("../results/" + experiment_folder);
+
+  const std::string output_folder = "../results/" + experiment_folder + "/" 
+    + pose_label + "_YM_" + std::to_string(YM) + "_PR_" + std::to_string(PR)
+    + "_deform_mag_" + std::to_string(deformation_magnitude) + "_deform_ratio_" 
+    + std::to_string(deformation_ratio) + "_fixed_boundary_range_" 
+    + std::to_string(fixed_boundary_range)+"_diff_" + diff_mode_str+"_smooth_" + smooth_mode_str+ "/";
+  {
+    // record the statistics
+    if (!std::filesystem::exists(output_folder))
+      std::filesystem::create_directory(output_folder);
+    if (!std::filesystem::exists(output_folder + "obj/"))
+      std::filesystem::create_directory(output_folder + "obj/");
+    if (!std::filesystem::exists(output_folder + "obj/" + mesh_name + "_" + eps_str + "/"))
+      std::filesystem::create_directory(output_folder + "obj/" + mesh_name + "_" + eps_str + "/");
+    if (!std::filesystem::exists(output_folder + "hist/"))
+      std::filesystem::create_directory(output_folder + "hist/");
+    if (!std::filesystem::exists(output_folder + "iter/"))
+      std::filesystem::create_directory(output_folder + "iter/");
+    if (!std::filesystem::exists(output_folder + "trust_region_ratio/"))
+      std::filesystem::create_directory(output_folder + "trust_region_ratio/");
+    if (!std::filesystem::exists(output_folder + "trust_region_eps/"))
+      std::filesystem::create_directory(output_folder + "trust_region_eps/");
+    if (!std::filesystem::exists(output_folder + "line_search_alpha/"))
+      std::filesystem::create_directory(output_folder + "line_search_alpha/");
+    if (!std::filesystem::exists(output_folder + "line_search_iter/"))
+      std::filesystem::create_directory(output_folder + "line_search_iter/");
+    
+    #if DEBUG_OUTPUT
+    if (!std::filesystem::exists(output_folder + "debug_log/"))
+    {
+      std::filesystem::create_directory(output_folder + "debug_log/");
+      TINYAD_INIT_DEBUG_LOG(output_folder + "debug_log/log"+get_time_str()+".txt");
+    }
+    #endif  
+
+    
+  }
+
+  const std::string output_tag = "mesh_" + mesh_name + "_eps_" + eps_str ;
+
+  // set up viewer
+  igl::opengl::glfw::Viewer viewer;
+  bool g_paused = false;      // 暂停标志
+  bool recording_started = false; //录制
+  int iter_i = 0;
+
+  // compute the Lame parameters
+  const double MU = YM / (2 * (1 + PR));
+  const double LAMBDA = YM * PR / ((1 + PR) * (1 - 2 * PR));
+  const double lambda_mu_ratio = LAMBDA / MU;
+ 
+  // print out the configuration
+  {
+    TINYAD_DEBUG_OUT("smooth flag: " << smooth_mode_str);
+    TINYAD_DEBUG_OUT("Diff flag: " << diff);
+    TINYAD_DEBUG_OUT("*Eigenvalue Differentiable filtering strategy: " << diff_mode_str);
+    TINYAD_DEBUG_OUT("Eigenvalue filtering strategy: " << eps_str);
+    TINYAD_DEBUG_OUT("mu: " << MU);
+    TINYAD_DEBUG_OUT("lambda: " << LAMBDA);
+    TINYAD_DEBUG_OUT("*Projection threshold: " << eps);
+    TINYAD_DEBUG_OUT("Mesh name: " << mesh_name);
+    TINYAD_DEBUG_OUT("Pose label: " << pose_label);
+    TINYAD_DEBUG_OUT("Lambda / Mu ratio: " << lambda_mu_ratio);
+    TINYAD_DEBUG_OUT("Deformation magnitude: " << deformation_magnitude);
+    TINYAD_DEBUG_OUT("Deformation ratio: " << deformation_ratio);
+    TINYAD_DEBUG_OUT("Fixed vertices boundary range: " << fixed_boundary_range);
+    TINYAD_DEBUG_OUT("Convergence threshold: " << convergence_eps);
+    TINYAD_DEBUG_OUT("Young's modulus: " << YM);
+    TINYAD_DEBUG_OUT("Poisson's ratio: " << PR);
+    TINYAD_DEBUG_OUT("Trust region threshold: " << tr_threshold);
+    TINYAD_DEBUG_OUT("Experiment folder: " << experiment_folder);
+    TINYAD_DEBUG_OUT("Rotate ratio: " << rotate_ratio);
+    TINYAD_DEBUG_OUT("Adaptive method: " << adaptive);
+    TINYAD_DEBUG_OUT("enable_constraint: " << enable_constraint);
+    
+  }
+
+  Eigen::MatrixXd V, U; // #V-by-3 3D vertex positions,V为初始,U为当前
+  Eigen::MatrixXi F, FF; // #T-by-4 indices into V
+  Eigen::VectorXi TriTag, TetTag;
+  if (std::filesystem::exists(std::string(SOURCE_PATH) + "/data/" + mesh_name + ".mesh"))
+    igl::readMESH(std::string(SOURCE_PATH) + "/data/" + mesh_name + ".mesh", V, F, FF);
+  else if (std::filesystem::exists(std::string(SOURCE_PATH) + "/data/" + mesh_name + ".msh"))
+    igl::readMSH(std::string(SOURCE_PATH) + "/data/" + mesh_name + ".msh", V, FF, F, TriTag, TetTag);
+  else {
+    std::cout << "Mesh " << mesh_name << " not found!" << std::endl;
+    exit(1);
+  }
+
+  TINYAD_DEBUG_OUT("Read mesh with " << V.rows() << " vertices and " << F.rows() << " tetrahedrons.");
+
+  // get boundary vertices
+  igl::boundary_facets(F, FF);
+  FF = FF.rowwise().reverse().eval();
+
+  TINYAD_DEBUG_OUT("Boundary has " << FF.rows() << " faces.");
+
+  // normalize the mesh V
+  Eigen::RowVector3d mean = V.colwise().mean();
+  V.rowwise() -= mean;
+  double max_norm = V.rowwise().norm().maxCoeff();
+  V /= max_norm;
+
+  // set up mesh U
+  U = V;
+
+  // fixed point constraints
+  Eigen::SparseMatrix<double> P;
+  std::vector<unsigned int> indices_fixed;
+
+  // set up fixed point constraints and initial deformation
+  setup_initial_deformation(V, F, pose_label, deformation_magnitude, deformation_ratio, rotate_ratio, fixed_boundary_range, U, indices_fixed);
+  fixed_point_constraints(P, 3*V.rows(), 3, indices_fixed);
+  // 预处理阶段
+  FSFEM_5NodeData elementData;
+  elementData.build_5node_fsfem_data(V,F);
+  
+  TINYAD_DEBUG_OUT("Finish setting up fixed point constraints.");
+
+  bool redraw = false;
+  std::mutex m;
+  std::thread optimization_thread(
+    [&]()
+    {
+      // Pre-compute triangle rest shapes in local coordinate systems
+      // std::vector<Eigen::Matrix3d> rest_shapes(F.rows());
+      // for (int f_idx = 0; f_idx < F.rows(); ++f_idx)
+      // {
+      //   // Get 3D vertex positions
+      //   Eigen::Vector3d ar = V.row(F(f_idx, 0));
+      //   Eigen::Vector3d br = V.row(F(f_idx, 1));
+      //   Eigen::Vector3d cr = V.row(F(f_idx, 2));
+      //   Eigen::Vector3d dr = V.row(F(f_idx, 3));
+
+      //   // Save 3-by-3 matrix with edge vectors as columns
+      //   rest_shapes[f_idx] = TinyAD::col_mat(br - ar, cr - ar, dr - ar);
+      // };
+
+      /*
+          TinyAD::scalar_function<3>: 创建一个标量函数，每个变量是3维向量（例如3D顶点坐标）
+          TinyAD::range(V.rows()): 定义变量的范围，V.rows() 是顶点数量
+          auto func: 自动推断函数对象类型
+      */ 
+      // TinyAD::scalar_function(n)：这是一个函数，可以计算它的函数值、梯度、Hessian的函数，其自变量索引的范围为n
+      // Set up function with 3d vertex positions as variables.
+      auto func = TinyAD::scalar_function<3>(TinyAD::range(V.rows()));
+      //Eigen::MatrixXi
+      // func.add_elements<n>(element_range, energy_function); 
+      // 定义元素的能量项，
+      // 1.n为元素的dim，其中
+      // 2.element_range是元素索引的范围，
+      // 3.energy_function是一个lambda函数，接受一个元素对象，返回该元素的能量值
+      // 4. lamda函数 [捕获变量] (输入参数) -> 返回值 
+      // 5. 所有参与自动微分计算的变量和中间结果，都必须使用 TINYAD_SCALAR_TYPE 或其衍生的类型
+      // 6. element.handle对应element_range中的当前元素的索引，element.variables()对应输入变量，想要访问输入变量的第i个变量
+      // 7. 在这个地方，输入变量是顶点数组，element_range是F数组，即按F计算能量
+      // Add objective term per element. Each connecting 5 vertices.
+      // "neo-hooken energy" is defined on each tetrahedron, so element_range is F.rows() and element.variables() gives the vertex positions of the current tetrahedron.
+      //Eigen::MatrixXi &face_vertices = elementData.face_vertices;
+      func.add_elements<5>(TinyAD::range(elementData.face_vertices.rows()), [&] (auto& element) -> TINYAD_SCALAR_TYPE(element) {
+          // Evaluate element using either double or TinyAD::Double
+          using T = TINYAD_SCALAR_TYPE(element);
+          //int n = 3;
+
+          // Get variable 3d vertex positions
+          Eigen::Index f_idx = element.handle;
+
+          // 获取5个顶点
+          const auto& verts = elementData.face_vertices.row(f_idx);
+
+          Eigen::Vector3<T> v0 = element.variables(verts[0]);
+          Eigen::Vector3<T> v1 = element.variables(verts[1]);
+          Eigen::Vector3<T> v2 = element.variables(verts[2]);
+          Eigen::Vector3<T> v3 = element.variables(verts[3]);
+          Eigen::Vector3<T> v4 = element.variables(verts[3]);
+
+          // 计算四面体A的变形梯度
+          // 注意：四面体A的参考构型中，顶点顺序必须与预处理一致！
+          // 假设预处理时四面体A的顶点顺序是 (v0, v1, v2, v3)
+          Eigen::Matrix3<T> M_a = TinyAD::col_mat(v1 - v0, v2 - v0, v3 - v0);
+          Eigen::Matrix3<T> Fe_a = M_a * elementData.Mr_inv[f_idx][0].cast<T>();
+          T w_a = elementData.adj_tet_volume[f_idx][0];
+          
+          T Vf = elementData.domain_volumes[f_idx];
+          Eigen::Matrix3<T> F_tilde = Fe_a ; // to be optimized by zj 去掉旋转后再加权
+
+          if (elementData.face_to_tets[f_idx].size()>1) //非边界面
+          {
+            // 计算四面体B的变形梯度
+            // 假设预处理时四面体B的顶点顺序是 (v4, v3, v2, v1)
+            Eigen::Matrix3<T> M_b = Eigen::Matrix3<T>::Zero();
+            // w_b = T(0.0);
+          
+            v4 = element.variables(verts[4]);
+            M_b = TinyAD::col_mat(v3 - v4, v2 - v4, v1 - v4);
+            T w_b = elementData.adj_tet_volume[f_idx][1];
+
+            Eigen::Matrix3<T> Fe_b = M_b * elementData.Mr_inv[f_idx][1].cast<T>(); //有可能为0
+          
+            // 加权平均得到光滑变形梯度
+            F_tilde = (w_a * Fe_a + w_b * Fe_b)/Vf; // to be optimized by zj 去掉旋转后再加权
+            
+          }
+          
+          // Eigen::Matrix3<T> Fe_b = M_b * elementData.Mr_inv[f_idx][1].cast<T>(); //有可能为0
+          
+          // // 加权平均得到光滑变形梯度
+          // T Vf = elementData.domain_volumes[f_idx];
+          // Eigen::Matrix3<T> F_tilde = (w_a * Fe_a + w_b * Fe_b)/Vf; // to be optimized by zj 去掉旋转后再加权
+          
+          // Neo-Hookean应变能密度
+          T Ic = (F_tilde.transpose() * F_tilde).trace();
+          T detF = F_tilde.determinant();
+          
+          const double mu = MU;
+          const double lambda = LAMBDA;
+          // auto Ic = (J.transpose() * J).trace();
+          // auto detF = J.determinant();
+          const double alpha = 1.0 + mu / lambda;
+          T W = mu/2.0 * (Ic - 3.0) + lambda/2.0 * (detF - alpha) * (detF - alpha);
+          
+          // 返回面光滑域总能量
+          return Vf * W;
+      });
+
+      //约束处理 zj
+      // 构建全局固定自由度标记
+      std::vector<bool> is_fixed_global(3 * V.rows(), false);
+      if (enable_constraint)
+      {
+        // TINYAD_DEBUG_OUT("enable_constraint: " << enable_constraint);
+        TINYAD_DEBUG_OUT("number of fixed vertices: " << indices_fixed.size());
+
+        for (int idx : indices_fixed) {
+            is_fixed_global[3*idx + 0] = true;
+            is_fixed_global[3*idx + 1] = true;
+            is_fixed_global[3*idx + 2] = true;
+        }
+        func.set_fixed_dofs(is_fixed_global);
+      }
+      
+
+      // 将这个信息传递给 ScalarObjectiveTerm
+      // 需要 TinyAD 暴露一个接口，或者通过 func 的底层访问
+
+      // to be optimized by zj: 可以考虑把 rest_shapes 以及 pre-computed Mr.inverse() 放到外边，作为常量传入 lambda 函数中，这样就不需要每次迭代都计算 rest_shapes 和 Mr.inverse() 了
+      // to be optimized by zj: 还可以考虑把 A 也放到外边，因为 A 只和 rest_shapes 相关，而 rest_shapes 是不变的
+      // to be optimized by zj: 还可以考虑把 lambda 和 mu 放到外边，因为它们也是不变的
+      // to be modified by zj: 动态状态下的PD，增加local step，即每个元素的能量项不仅依赖于当前状态，还依赖于上一个状态，这样可以增加稳定性，尤其是在使用abs投影时
+
+      // func.x_from_data() 是 TinyAD 提供的数据格式转换工具，将外部数据（如顶点矩阵）转换为优化所需的展平向量格式，使代码更简洁、更安全。
+      // v_idx 的取值范围是由 TinyAD::scalar_function<k>(n_variables) 中的 n_variables 决定的，即函数的输入变量的维度。
+      // 在这个例子中，n_variables 是 V.rows()，即顶点数量，因此 v_idx 的取值范围是 [0, V.rows()-1]。
+      // Assemble inital x vector from U matrix.
+      // x_from_data(...) takes a lambda function that maps
+      // each variable handle (vertex index) to its initial 2D value (Eigen::Vector2d).
+      Eigen::VectorXd x = func.x_from_data([&] (int v_idx) {
+          return U.row(v_idx);
+      });
+
+      TINYAD_DEBUG_OUT("Initial energy: " << func.eval(x));
+
+      // Projected Newton
+      TinyAD::LinearSolver solver; //Eigen::SimplicialLDLT*,ConjugateGradient,SparseLU
+      int max_iters = 200; // 迭代次数可以根据需要调整
+      Eigen::VectorXd d;
+      Eigen::SparseMatrix<double> H;
+      std::vector<double> hist;
+      Eigen::VectorXd x0(x.size()) ;
+      x0.setZero();
+      // record the trust region ratio
+      // 衡量模型预测的准确性 ρ = (实际下降) / (预测下降), 
+      // ρ < 0         → 实际目标函数值增加（拒绝步长）
+      // 0 ≤ ρ < 0.25  → 模型质量差，缩小信赖域
+      // 0.25 ≤ ρ < 0.75 → 模型质量一般，保持信赖域
+      // ρ ≥ 0.75      → 模型质量好，可以放大信赖域
+      // double delta;  // 当前信赖域半径
+      // double eta1;   // 接受步长的阈值（通常0.25）
+      // double eta2;   // 放大半径的阈值（通常0.75）
+      std::vector<double> hist_trust_region_ratio;
+      hist_trust_region_ratio.push_back(0.0);
+
+      std::vector<double> hist_trust_region_eps; // 记录每次迭代使用的eps值，以观察自适应策略的变化
+      std::vector<double> hist_line_search_alpha; // 记录每次迭代的线搜索步长
+      std::vector<int> hist_line_search_iter; // 记录每次迭代的线搜索迭代次数
+
+      std::vector<double> hist_energy_injection_ratio1;
+      hist_energy_injection_ratio1.push_back(0.0);
+      std::vector<double> hist_energy_injection_ratio2;
+      hist_energy_injection_ratio2.push_back(0.0);
+
+      //double cubic_sigma = 0.0;
+      //Eigen::VectorXd cubic_lambda_vec = Eigen::VectorXd::Zero();
+      
+      //当global matrix发生变化时，进行下面的牛顿投影和线搜索步骤
+      bool useClamp = false;
+      int increase_count = 0;
+     
+      if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING
+      // || _diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING_SMOOTH
+      // || _diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING2
+      // || _diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING3
+      // || _diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING5
+      // || _diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING4
+      ) // 从abs开始
+      {
+        eps = 1.0;
+        TINYAD_DEBUG_OUT("Switch to abs");
+      }
+      if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING_SHEAR)
+      {
+        hist_trust_region_ratio.push_back(1.0);
+      }
+
+      for (int i = 0; i < max_iters; ++i)
+      {
+        double prev_ratio = hist_trust_region_ratio.back(); //初值为0
+        iter_i = i;
+        recording_started = false;
+        if (g_paused )
+        {
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          i--;
+          recording_started = false;
+          continue;
+        }
+
+        igl::writeOBJ(output_folder + "obj/" + mesh_name + "_" + eps_str + "/" + output_tag + "_iter_" + std::to_string(i) + ".obj", U, FF);
+        igl::writeMESH(output_folder + "obj/" + mesh_name + "_" + eps_str + "/" + output_tag + "_iter_" + std::to_string(i) + ".mesh", U, F, FF);
+      
+        // switch between clamp or abs depending on whether the trust region ratio is close to 1
+        //if(eps_str == "adaptive") {
+        if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_NONDIFF) 
+        // ||_diff_mode == TinyAD::HessianProjectionMode::ABS_SHIFT_CLAMP_NONDIFF 
+        // ||_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING_SHEAR 
+        // ||_diff_mode == TinyAD::HessianProjectionMode::SMOOTH_TR) 
+        {
+          eps = (std::fabs(hist_trust_region_ratio.back() - 1.0) < tr_threshold) ? 0.0 : -1; // tr_threshold信赖域接受步长的阈值，通常设置为0.01,大于接受
+
+          if (eps == 0.0) {
+            //eps = TinyAD::EPS_1E_8; // 避免eps为0导致的数值问题
+            TINYAD_DEBUG_OUT("Switch to clamp");  
+          }
+          else {
+            TINYAD_DEBUG_OUT("Switch to abs");
+          }
+          hist_trust_region_eps.push_back(eps);
+        }
+
+        //ok, beta0 adaptive
+        if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING 
+        // || _diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING_SMOOTH
+        // || _diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING2
+        // || _diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING3
+        // || _diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING5
+        || _diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING4) //adaptive mode
+        {
+          
+          if (TinyAD::isPostive(adaptive + TinyAD::EPS_1E_8)) // >0
+          {
+            
+            if (std::fabs(prev_ratio-1.0) < tr_threshold) //不需要改变beta0
+            {
+              if (!useClamp) //switch mode
+              {
+                TINYAD_DEBUG_OUT("Switch to clamp"); 
+              }
+              eps = 0; 
+              useClamp = true;
+              
+            }
+            else //需要改变beta0
+            {
+              
+              if(useClamp) //switch mode
+              {
+                TINYAD_DEBUG_OUT("Switch to abs");
+                eps = 1.0;
+                useClamp = false;
+              }
+              if(TinyAD::isPostive(prev_ratio, 0.9))// >0.9模型激进，缩小beta0 <1
+              {
+                eps *= 0.9;
+              }
+              else if (TinyAD::isPostive(0.25, prev_ratio))// < 0.2 模型保守，放大beta0 >1
+              {
+                if (i > 0) // 第一次不调整
+                {
+                  eps = eps * 1.02; 
+                }  
+              }
+                
+            }
+            
+            eps = std::max(0.0, std::min(1.2, eps)); 
+          }
+          else // not adaptive [0 or 1]
+          {
+            eps = 1.0; 
+            
+          }
+            
+          TINYAD_DEBUG_OUT("eps: "<<eps); 
+          hist_trust_region_eps.push_back(eps);
+        }
+      
+        // if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING_SHEAR )
+        // {
+        //   eps = hist_trust_region_ratio.back(); 
+        //   TINYAD_DEBUG_OUT("last tr_ratio: "<<eps);
+        // }
+        
+        auto [f, g, H_proj] = func.eval_with_hessian_proj(x, eps, _diff_mode); // 
+        Eigen::SparseMatrix<double> H0 = func.eval_hessian(x); // 计算未投影的Hessian，用于后续计算牛顿下降量和牛顿下降量
+
+        double prev_energy = 0;
+        if (hist.empty() == false)
+        {
+            prev_energy = hist.back();
+        }
+        // record the energy
+        hist.push_back(f);
+        
+
+        TINYAD_DEBUG_OUT("Energy in iteration " << i << ": " << f);
+
+        // Compute the Newton direction
+        H = H_proj;
+        
+
+        Eigen::VectorXd Pg = P*g; // 固定点约束下的梯度
+        Eigen::SparseMatrix<double> PHP = P*H*P.transpose();
+        d = TinyAD::newton_direction(Pg, PHP, solver); //用于计算牛顿方向的函数,sovler是线性方程求解器实例
+        d = P.transpose() * d;
+
+        TINYAD_DEBUG_OUT("Newton decrement " << i << " =  " << TinyAD::newton_decrement(d, g));
+        TINYAD_DEBUG_OUT("d norm " << i << " =  " << d.norm());
+        TINYAD_DEBUG_OUT("g norm " << i << " =  " << g.norm());
+
+        // 对于刚性材料（LAMBDA大）：收敛标准更严格; 对于柔软材料（LAMBDA小）：收敛标准更宽松
+        // 优化方案1： 相对收敛
+        // if (newton_decrement < convergence_eps * initial_decrement) break;  
+        // 方案3：梯度范数 
+        // if (g.norm() < convergence_eps) break;
+        // 方案4：牛顿下降量（Newton decrement）  Newton decrement = sqrt(d' * H * d)，它衡量了沿着牛顿方向的预期下降量
+        // 方案5：根据材料参数调整收敛标准
+        //  LAMBDA是材料参数，不是尺度参数
+        // // 使用特征长度进行无量纲化
+        // double characteristic_length = compute_mesh_size(V); // 计算网格特征尺寸
+        // double characteristic_volume = characteristic_length * characteristic_length * characteristic_length;
+        // // 物理意义的收敛判据
+        // if (std::fabs(TinyAD::newton_decrement(d, g)) < convergence_eps * LAMBDA * characteristic_volume) break;
+        if (std::fabs(TinyAD::newton_decrement(d, g)) < convergence_eps * LAMBDA)
+          break;
+
+        // line search
+        Eigen::VectorXd x_prev = x;
+        double decay = 0.8; // clamp默认值,每次线搜索迭代的步长衰减因子，通常设置为0.5到0.8之间
+
+        x = TinyAD::line_search(x, d, f, g, func, 1.0, 0.8, 100, 1e-8);
+        double alpha = (x - x_prev).norm() / d.norm(); // 计算实际步长与牛顿方向的比值，反映线搜索的收缩程度
+        hist_line_search_alpha.push_back(alpha);
+
+        int line_search_iter = std::lround(std::log(alpha) / std::log(0.8)) + 1; // 计算线搜索迭代次数，基于初始步长和最终步长的比值
+        hist_line_search_iter.push_back(line_search_iter);
+
+        // compute the trust region ratio
+        double trust_region_ratio = compute_trust_region_ratio(func.eval(x), f, alpha*d, g, H0); // 计算信赖域比率，评估模型预测的准确性
+        hist_trust_region_ratio.push_back(trust_region_ratio);
+
+        TINYAD_DEBUG_OUT("Trust region ratio: " << trust_region_ratio);
+
+        //能量注入
+        Eigen::VectorXd delta_x = x - x0 ;
+        double energy_proj = delta_x.transpose() * (H_proj  * delta_x) ;
+        double energy_orig = delta_x.transpose() * (H0  * delta_x );
+        double energy_inj = energy_proj - energy_orig;
+        
+        hist_energy_injection_ratio1.push_back(energy_inj/(prev_energy+1e-8));
+        TINYAD_DEBUG_OUT("Energy injected, energy injected ratio: " << energy_inj <<","<< hist_energy_injection_ratio1.back());
+        double total_energy = hist.back();
+        // double total_energy = 0;
+        double energy_descrease = prev_energy - total_energy;
+        hist_energy_injection_ratio2.push_back(energy_descrease/(prev_energy+1e-8));
+        TINYAD_DEBUG_OUT("Energy decreased, energy descrease ratio: " << energy_descrease <<","<< hist_energy_injection_ratio2.back());
+
+        x0 = x;
+
+        // Write final x vector to U matrix.
+        // x_to_data(...) takes a lambda function that writes the final value
+        // of each variable (Eigen::Vector2d) back to our U matrix.
+        func.x_to_data(x, [&] (int v_idx, const Eigen::Vector3d& p) {
+            U.row(v_idx) = p;
+            });
+        {
+          std::lock_guard<std::mutex> lock(m);
+          redraw = true; 
+          recording_started = true;
+        }
+
+        TINYAD_DEBUG_OUT("---------------------------------------------------");
+      }
+
+      TINYAD_DEBUG_OUT("Final energy: " << func.eval(x));
+      hist.push_back(func.eval(x));
+
+      // output all the optimization statistics
+      {
+        igl::writeOBJ(output_folder + "obj/" + mesh_name + "_" + eps_str + "/" + output_tag + "_iter_" + std::to_string(hist.size()-1) + ".obj", U, FF);
+        igl::writeMESH(output_folder + "obj/" + mesh_name + "_" + eps_str + "/" + output_tag + "_iter_" + std::to_string(hist.size()-1) + ".mesh", U, F, FF);
+        
+        std::ofstream output_file_fixed(output_folder + "obj/" + mesh_name + "_" + eps_str + "/" + output_tag + "_fixed_vid.txt");
+        std::ostream_iterator<int> output_iterator_fixed(output_file_fixed, "\n");
+        std::copy(std::begin(indices_fixed), std::end(indices_fixed), output_iterator_fixed);
+
+        std::ofstream output_file(output_folder + "hist/" + output_tag + ".txt");
+        std::ostream_iterator<double> output_iterator(output_file, "\n");
+        std::copy(std::begin(hist), std::end(hist), output_iterator);
+
+        std::ofstream output_file_trust_region_ratio(output_folder + "trust_region_ratio/" + output_tag + ".txt");
+        std::ostream_iterator<double> output_iterator_trust_region_ratio(output_file_trust_region_ratio, "\n");
+        std::copy(std::begin(hist_trust_region_ratio), std::end(hist_trust_region_ratio), output_iterator_trust_region_ratio);
+
+        std::ofstream output_file_trust_region_eps(output_folder + "trust_region_eps/" + output_tag + ".txt");
+        std::ostream_iterator<double> output_iterator_trust_region_eps(output_file_trust_region_eps, "\n");
+        std::copy(std::begin(hist_trust_region_eps), std::end(hist_trust_region_eps), output_iterator_trust_region_eps);
+
+        std::ofstream output_file_line_search_alpha(output_folder + "line_search_alpha/" + output_tag + ".txt");
+        std::ostream_iterator<double> output_iterator_line_search_alpha(output_file_line_search_alpha, "\n");
+        std::copy(std::begin(hist_line_search_alpha), std::end(hist_line_search_alpha), output_iterator_line_search_alpha);
+
+        std::ofstream output_file_line_search_iter(output_folder + "line_search_iter/" + output_tag + ".txt");
+        std::ostream_iterator<int> output_iterator_line_search_iter(output_file_line_search_iter, "\n");
+        std::copy(std::begin(hist_line_search_iter), std::end(hist_line_search_iter), output_iterator_line_search_iter);
+
+        std::ofstream output_file_energy_injection1(output_folder + "energy_injection1/" + output_tag + ".txt");
+        std::ostream_iterator<int> output_energy_injection1(output_file_energy_injection1, "\n");
+        std::copy(std::begin(hist_energy_injection_ratio1), std::end(hist_energy_injection_ratio1), output_energy_injection1);
+
+        std::ofstream output_file_energy_injection2(output_folder + "energy_injection2/" + output_tag + ".txt");
+        std::ostream_iterator<int> output_energy_injection2(output_file_energy_injection2, "\n");
+        std::copy(std::begin(hist_energy_injection_ratio2), std::end(hist_energy_injection_ratio2), output_energy_injection2);
+
+
+        std::ofstream output_file_iter(output_folder + "iter/" + output_tag + ".txt");
+        output_file_iter << (hist.size()-1) << std::endl;
+      }
+
+      
+      //写到同一文件,方便方案对比
+      std::vector<std::string> arr_time_str = {time_str};
+      std::vector<std::string> arr_mesh_name = {mesh_name};
+      std::vector<std::string> arr_pos = {pose_label};
+      std::vector<long> arr_n_v = {V.rows()};
+      std::vector<long> arr_n_t = {F.rows()};
+      std::vector<double> arr_pr = {PR};
+      std::vector<double> arr_ym = {YM};
+      std::vector<double> arr_deformation_ratio = {deformation_ratio};
+      std::vector<double> arr_deformation_magnitude = {deformation_magnitude};
+      std::vector<double> arr_rotate_ratio = {rotate_ratio};
+      std::vector<std::string> arr_diff_mode_str = {diff_mode_str+smooth_mode_str};
+      std::vector<int> arr_iter = {static_cast<int>(hist.size()-1)};
+      
+      // 使用
+      const std::string results_file_csv = "../results/results_compare.csv";
+      
+      CSVLineBuilder builder;
+      builder.add(arr_time_str)
+            .add(arr_mesh_name)
+            .add(arr_n_v)
+            .add(arr_n_t)
+            .add(arr_pos)
+            .add(arr_pr)
+            .add(arr_ym)
+            .add(arr_deformation_ratio)
+            .add(arr_deformation_magnitude)
+            .add(arr_rotate_ratio)
+            .add(arr_diff_mode_str)
+            .add(arr_iter)
+            .add(hist) //energy
+            .add(hist_line_search_iter)
+            .add(hist_energy_injection_ratio1)
+            .add(hist_energy_injection_ratio2)
+            .writeToFile(results_file_csv, true);  // true表示换行
+      
+
+      TINYAD_DEBUG_OUT("======== The End ========");
+      // comment this out later
+      // close the viewer
+      exit(0);
+    });
+
+  // Plot mesh
+  // viewer.core().is_animating = true;
+  // viewer.data().set_mesh(U, FF);
+  // viewer.core().align_camera_center(U);
+  // viewer.data().show_lines = false;
+  // viewer.core().depth_test = true;
+  // viewer.data().line_width = 1.0;
+
+  // // 设置透明材质
+  // Eigen::Vector3d color(0.2, 0.2, 0.8);
+  // viewer.data().uniform_colors(
+  //     //Eigen::Vector3d(color3(0), color3(1), color3(2)),  // 漫反射
+  //     Eigen::Vector3d(color(0), color(1), color(2)),  // 漫反射
+  //     Eigen::Vector3d(0.2, 0.2, 0.2),  // 环境光
+  //     Eigen::Vector3d(0.0, 0.0, 0.0)   // 镜面反射
+  // );
+    
+  // // 设置面的透明度 - 使用材质属性
+  // viewer.data().face_based = true;  // 基于面的渲染
+
+  // Plot mesh
+  viewer.core().is_animating = true;
+  viewer.data().set_mesh(U, FF);
+  viewer.core().align_camera_center(U);
+  viewer.data().show_lines = true;
+  viewer.core().depth_test = true;
+  viewer.data().line_width = 1.0;
+
+  // 设置透明材质
+  Eigen::Vector3d color(0.2, 0.2, 0.8);
+  viewer.data().uniform_colors(
+      //Eigen::Vector3d(color3(0), color3(1), color3(2)),  // 漫反射
+      Eigen::Vector3d(color(0), color(1), color(2)),  // 漫反射
+      Eigen::Vector3d(0.2, 0.2, 0.2),  // 环境光
+      Eigen::Vector3d(0.0, 0.0, 0.0)   // 镜面反射
+  );
+    
+  // 设置面的透明度 - 使用材质属性
+  viewer.data().face_based = true;  // 基于面的渲染
+  
+  std::cout << "\n>>> " << (g_paused ? "⏸ 已暂停" : "▶ 继续迭代") 
+                        << " (按空格键切换)\n";
+  std::cout << "\n>>> " << (recording_started ? "⏺ 录制中" : "⏸ 已暂停") 
+                        << " (按 'r' 键切换)\n";
+  // ========================================
+  // 键盘回调：控制暂停/继续
+  // ========================================
+  viewer.callback_key_pressed = [&](igl::opengl::glfw::Viewer&, 
+                                  unsigned int key, int modifiers) -> bool {
+      switch (key) {
+          case 32:  // 空格键：暂停/继续
+              g_paused = !g_paused;
+              std::cout << "\n>>> " << (g_paused ? "⏸ 已暂停" : "▶ 继续迭代") 
+                        << " (按空格键切换)\n";
+              return true;
+          case 114:  // 'r' 键：暂停/继续
+          case 82:  // 'R' 键：暂停/继续
+              recording_started = !recording_started;
+              std::cout << "\n>>> " << (recording_started ? "⏺ 录制中" : "⏸ 已暂停") 
+                        << " (按 'r/R' 键切换)\n";
+              return true;
+              
+          default:
+              return false;  // 未处理的按键交给查看器默认处理
+      }
+  };
+
+  // // 使用 callback_post_draw 替代 callback_pre_draw
+  // // 录像参数
+  // static int frame_count = 0;
+  // static int warmup_frames = 10;  // 等待5帧再开始录制
+  // const int fps = 30;
+  // auto last_time = std::chrono::steady_clock::now();
+  
+  
+  // std::cout << "========================================" << std::endl;
+  // std::cout << "Warming up... Recording will start in " << warmup_frames << " frames" << std::endl;
+  // std::cout << "========================================" << std::endl;
+  // if (!std::filesystem::exists(output_folder + "frames"))
+  //     std::filesystem::create_directory(output_folder + "frames");
+
+  std::string title = experiment_folder.erase(0,7).erase(experiment_folder.size()-15)+ "_" + diff_mode_str.c_str() + "_" + smooth_mode_str.c_str();
+  title += "_" + std::to_string(deformation_ratio) + "_" + std::to_string(rotate_ratio)+ "_" + std::to_string(deformation_magnitude);
+
+  viewer.callback_pre_draw = [&] (igl::opengl::glfw::Viewer& viewer)
+  {
+    // 检查是否应该执行迭代
+    if(redraw)
+    {
+      viewer.data().set_vertices(U);
+      viewer.core().align_camera_center(U);
+      {
+        std::lock_guard<std::mutex> lock(m);
+        redraw = false;
+      }
+
+      // 获取 GLFW 窗口指针并设置标题
+      glfwSetWindowTitle(viewer.window, (title +" iter " +std::to_string(iter_i)).c_str() );
+      
+    }
+    return false;
+
+  };
+
+  // 在初始化回调中设置标题
+  viewer.callback_init = [&](igl::opengl::glfw::Viewer& v)
+  {
+      // 获取 GLFW 窗口指针并设置标题
+      glfwSetWindowTitle(v.window, diff_mode_str.c_str());
+      return false;
+  };
+
+  viewer.launch();
+  if(optimization_thread.joinable())
+  {
+    optimization_thread.join();
+  }
+
+  #if DEBUG_OUTPUT
+    TINYAD_CLOSE_DEBUG_LOG();
+  #endif
+  return 0;
+}
+ 
 int main(int argc, char** argv)
 {
   #if SHEAR_PROJECTED_NEWTON
     //std::cout <<  << std::endl;
-    TINYAD_DEBUG_OUT("Using shear projected Newton method with trust region heuristic.");
+    // TINYAD_DEBUG_OUT("Using shear projected Newton method with trust region heuristic.");
     //shear_projected_newton(argc, argv);
-    shear_reg_projected_newton(argc, argv);
+    //shear_reg_projected_newton(argc, argv);
+    fs_projected_newton_global(argc, argv);
   #elif CUBIC_DEFORM_PROJECTED_NEWTON
     //std::cout <<  << std::endl;
     TINYAD_DEBUG_OUT("Using cubic projected Newton method with trust region heuristic.");
