@@ -93,11 +93,16 @@ public:
                 return lambda < epsilon + smoothness;
         }
     }
+
+public:
+    void set_J(T J_val) { m_J = J_val; }
+   
     
 private:
     T epsilon;
     T smoothness;
     HessianProjectionMode mode;
+    T m_J = T(1.0);   // ← 新增
     
     // 自动模式：根据 epsilon 值选择策略
     T auto_regularize(T lambda) const {

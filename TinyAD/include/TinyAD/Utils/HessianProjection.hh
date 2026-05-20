@@ -10,6 +10,9 @@
 #include <TinyAD/Utils/Helpers.hh>
 //#include <TinyAD/Utils/DiffHessian2.hh>
 #include <TinyAD/Utils/DiffHessianProjection.hh>
+#include "../../../include/ElementDeformationState.h"
+// #include "../../../include/ElementDeformationState.h"  // 或项目 include 路径
+
 namespace TinyAD
 {
 
@@ -550,6 +553,403 @@ Eigen::VectorXd computeGradientProjection(Eigen::MatrixXd eigenvectors, Eigen::V
     return Eigen::VectorXd::Ones(eigenvectors.rows());
 }
 
+/**
+ * @brief 计算基于特征值的hessian信息指标，衡量负特征值的占比，范围0-1，越大说明负特征值占比越大，可能需要更激进的增强
+ */
+
+double computeAlpha_hessian( const Eigen::VectorXd& eigenvalues, double m_eps)
+{
+    double alpha_hessian = 0.0;
+    double sum_lambda = 0;
+    double sum_neg_lambda = 0;
+    for (int i = 0; i < eigenvalues.size(); ++i) {
+        double lambda_i = eigenvalues(i);
+        double abs_lambda_i = std::abs(lambda_i);
+
+        sum_lambda += abs_lambda_i;
+        if (lambda_i < 0) {
+            sum_neg_lambda += abs_lambda_i;
+        }
+    }
+    double r = sum_neg_lambda / (sum_lambda + m_eps); // 负特征值占比
+    alpha_hessian = 1 - std::exp(-4.0 * r); // 通过指数函数映射到0-1，增强敏感度
+
+    alpha_hessian = std::max(0.0, std::min(1.0, alpha_hessian)); // 确保在0-1范围内
+    #if DEBUG_OUTPUT
+        TINYAD_DEBUG_OUT("alpha_hessian:"<<alpha_hessian<<", r:"<<r);  
+    #endif
+
+    return alpha_hessian;
+}
+/**
+ * @brief 优化单个负特征值（带梯度信息）
+ * case 1: 收缩程度受grad影响, 0-1.0
+ * case 2: 收缩程度受hessian影响, 0-1.0
+ * case 3: hessian信息和梯度信息共同决定收缩程度，hessian主导，grad微调，0.8-1.0
+ * case 4: hessian信息和梯度信息共同决定收缩程度，grad主导，hessian微调，0.8-1.0
+ * case 5: 不收缩1.0,abs(lambda)
+ * case 0: 强收缩0.0，clamp(lambda),直接投影到m_eps
+ */
+double optimizeVpnEigenvalue_neg( 
+    double lambda, double alpha_grad, double alpha_hessian, double alpha_J,
+    int mode, double m_eps)
+{
+    double alpha_base = 1.0 ;
+    double alpha_lambda = 1.0;
+    double alpha_eps = 0.0;
+    
+    double b = -lambda;
+
+    switch(mode) 
+    {   
+        case 1: // 收缩程度受grad影响, 0-1.0 ，理论公式
+        {
+            alpha_base = std::max(0.0, std::min(1.0, alpha_grad));
+            alpha_lambda = alpha_base;
+            alpha_lambda = std::max(0.0, std::min(1.0, alpha_lambda));
+
+            alpha_eps = 1.0 - alpha_lambda;
+            break;
+        }
+        case 2: // 收缩程度受hessian影响, 0-1.0
+        {
+            alpha_base = std::max(0.0, std::min(1.0, alpha_hessian));
+            alpha_lambda = alpha_base;
+            alpha_lambda = std::max(0.0, std::min(1.0, alpha_lambda));
+
+            alpha_eps = 1.0 - alpha_lambda;
+            break;
+        }
+        case 3: // hessian信息和梯度信息共同决定收缩程度，hessian主导，grad微调，0.8-1.0
+        {
+            
+
+            alpha_base = std::max(0.0, std::min(1.0, alpha_hessian));
+            
+            alpha_grad = std::max(0.0, std::min(1.0, alpha_grad));
+            alpha_lambda = alpha_base * (0.8 + 0.2 * alpha_grad);
+
+            alpha_lambda = std::max(0.0, std::min(1.0, alpha_lambda));
+            
+            alpha_eps = 1.0 - alpha_lambda;
+            break;
+        }
+        case 4: // hessian信息和梯度信息共同决定收缩程度，grad主导，hessian微调，0.8-1.0
+        {
+            
+            alpha_base = std::max(0.0, std::min(1.0, alpha_grad));
+
+            alpha_hessian = std::max(0.0, std::min(1.0, alpha_hessian));
+            alpha_lambda = alpha_base * (0.8 + 0.2 * alpha_hessian);
+            alpha_lambda = std::max(0.0, std::min(1.0, alpha_lambda));
+            
+            alpha_eps = 1.0 - alpha_lambda;
+            break;
+        }
+        case 5: // abs
+        {
+            alpha_lambda = 1.0; // 收缩程度受β和权重影响
+            alpha_eps = 0.0;
+            break;
+        }
+        case 6: // hessian信息和梯度信息共同决定收缩程度，grad主导，J，0.8-1.0
+        {
+            
+            alpha_base = std::max(0.0, std::min(1.0, alpha_grad));
+
+            alpha_hessian = std::max(0.0, std::min(1.0, alpha_hessian));
+            alpha_lambda = alpha_base * (0.8 + 0.2 * alpha_hessian);
+            alpha_lambda = std::max(0.0, std::min(1.0, alpha_lambda));
+
+            alpha_J = std::max(0.0, std::min(1.0, alpha_J));
+            alpha_lambda = std::max(alpha_J,  alpha_lambda); //翻转时，J主导，grad微调
+            
+            alpha_eps = 1.0 - alpha_lambda;
+            break;
+        }
+        case 7: // grad,J决定收缩程度，0.1-1.0
+        {
+            
+            alpha_base = std::max(0.0, std::min(1.0, alpha_grad));
+
+            alpha_J = std::max(0.0, std::min(1.0, alpha_J));
+            alpha_lambda = std::max(alpha_J,  alpha_lambda); //翻转时，J主导，grad微调
+
+            alpha_lambda = std::max(0.0, std::min(1.0, alpha_lambda));
+            
+            alpha_eps = 1.0 - alpha_lambda;
+            break;
+        }
+        case 8: // J，0.0-1.0
+        {
+            
+            alpha_base = std::max(0.0, std::min(1.0, alpha_J));
+            alpha_lambda = std::max(0.0, std::min(1.0, alpha_base));
+            
+            alpha_eps = 1.0 - alpha_lambda;
+            break;
+        }
+        case 9: // grad+J，0.0-1.0, 理论公式
+        {
+            
+            alpha_lambda = alpha_grad * alpha_J;
+            alpha_lambda = std::max(0.0, std::min(1.0, alpha_lambda));
+            
+            alpha_eps = 1.0 - alpha_lambda;
+            break;
+        }
+        case 10: // J base+_grad，0.0-1.0
+        {
+            
+            alpha_base = std::max(0.0, std::min(1.0, alpha_J));
+            
+            alpha_grad = std::max(0.0, std::min(1.0, alpha_grad));
+            alpha_lambda = alpha_base * (0.8 + 0.2 * alpha_grad);
+
+            alpha_lambda = std::max(0.0, std::min(1.0, alpha_lambda));
+            
+            alpha_eps = 1.0 - alpha_lambda;
+            break;
+        }
+        case 11: // grad base+J，0.0-1.0
+        {
+            
+            alpha_base = std::max(0.0, std::min(1.0, alpha_grad));
+
+            alpha_J = std::max(0.0, std::min(1.0, alpha_J));
+            alpha_lambda = alpha_base * (0.8 + 0.2 * alpha_J);
+
+            alpha_lambda = std::max(0.0, std::min(1.0, alpha_lambda));
+            
+            alpha_eps = 1.0 - alpha_lambda;
+            break;
+        }
+        default:
+        {
+            alpha_lambda = 0.0; // 收缩程度受β和权重影响
+            alpha_eps = 1.0;
+            break;
+        }
+              
+    }
+    
+    #if DEBUG_OUTPUT
+        TINYAD_DEBUG_OUT("负alpha_lambda:"<<alpha_lambda<<", 负alpha_base:"<<alpha_base); 
+        TINYAD_DEBUG_OUT("负alpha_hessian:"<<alpha_hessian<<", 负alpha_grad:"<<alpha_grad<<", 负alpha_J:"<<alpha_J); 
+    #endif
+    return alpha_lambda * b + alpha_eps * m_eps;
+}
+
+/**
+ * @brief 优化单个正特征值（带梯度信息）
+ * case 1: 固定0.8,有eps
+ * case 2: 固定0.8,无eps
+ * case 3: 收缩程度受grad影响, 0.8-1.0
+ * case 4: hessian信息和梯度信息共同决定收缩程度，hessian主导，grad微调，0.8-1.0
+ * case 5: hessian信息和梯度信息共同决定收缩程度，grad主导，hessian微调，0.8-1.0
+ * case 0: 不收缩1.0,clamp(lambda)
+ */
+double optimizeVpnEigenvalue_pos( 
+    double lambda, double alpha_grad, double alpha_hessian, double alpha_J,
+    int mode, double m_eps)
+{
+    double alpha_lambda = 1.0;
+    double alpha_eps = 0.0;
+    double alpha_base = 1.0 ;
+
+    switch(mode) 
+    {   case 1: //固定0.8,有eps
+        {
+            alpha_lambda = 0.8;  
+            alpha_eps = 1.0 - alpha_lambda;
+            break;  
+        }
+        case 2: //固定0.8,无eps
+        {
+            alpha_lambda = 0.8;  
+            alpha_eps = 0.0;
+            break;
+        }
+        case 3: // 收缩程度受grad影响, 0.8-1.0
+        {
+             // 收缩程度受grad影响
+
+            alpha_lambda = alpha_base * (0.8 + 0.2 * alpha_grad);
+
+            alpha_lambda = std::max(0.0, std::min(1.0, alpha_lambda));
+
+            alpha_eps = 1.0 - alpha_lambda;
+            break;
+        }
+        case 4: // hessian信息和梯度信息共同决定收缩程度，hessian主导，grad微调，0.8-1.0
+        {
+            
+            alpha_base = std::min(1.0, alpha_hessian);
+
+            alpha_lambda = alpha_base * (0.8 + 0.2 * alpha_grad);
+            alpha_lambda = std::max(0.0, std::min(1.0, alpha_lambda));
+            
+            alpha_eps = 1.0 - alpha_lambda;
+            break;
+        }
+        case 5: // hessian信息和梯度信息共同决定收缩程度，grad主导，hessian微调，0.8-1.0
+        {
+            
+            alpha_base = std::min(1.0, alpha_grad);
+
+            alpha_lambda = alpha_base * (0.8 + 0.2 * alpha_hessian);
+            alpha_lambda = std::max(0.0, std::min(1.0, alpha_lambda));
+            
+            alpha_eps = 1.0 - alpha_lambda;
+            break;
+        }
+        default:
+        {
+            alpha_lambda = 1.0; // 收缩程度受β和权重影响
+            alpha_eps = 0.0;
+            break;
+        }
+              
+    } 
+
+    #if DEBUG_OUTPUT
+        // TINYAD_DEBUG_OUT("alpha_lambda:"<<alpha_lambda<<", alpha_base:"<<alpha_base); 
+        // TINYAD_DEBUG_OUT("alpha_hessian:"<<alpha_hessian<<", alpha_grad:"<<alpha_grad<<", alpha_J:"<<alpha_J); 
+    #endif
+
+    return alpha_lambda * lambda + alpha_eps * m_eps;
+
+    
+}
+
+/**
+ * @brief 优化单个特征值（带梯度信息）
+ * **
+ * 优化单个正特征值（带梯度信息）
+ * case 1: 固定0.8,有eps
+ * case 2: 固定0.8,无eps
+ * case 3: 收缩程度受grad影响, 0.8-1.0
+ * case 4: hessian信息和梯度信息共同决定收缩程度,hessian主导,grad微调,0.8-1.0
+ * case 5: hessian信息和梯度信息共同决定收缩程度,grad主导,hessian微调,0.8-1.0
+ * case 0: 不收缩1.0,clamp(lambda)
+ * **
+ * 优化单个负特征值（带梯度信息）
+ * case 1: 收缩程度受grad影响, 0-1.0
+ * case 2: 收缩程度受hessian影响, 0-1.0
+ * case 3: hessian信息和梯度信息共同决定收缩程度,hessian主导,grad微调,0.8-1.0
+ * case 4: hessian信息和梯度信息共同决定收缩程度,grad主导,hessian微调,0.8-1.0
+ * case 5: 不收缩1.0,abs(lambda)
+ * case 0: 强收缩0.0,clamp(lambda),直接投影到m_eps
+ *
+ */
+ double optimizeVpnEigenvalue( 
+    double lambda, double alpha_grad, double alpha_hessian, double alpha_J,
+    double m_eps)
+{
+    
+    m_eps = TinyAD::EPS_1E_8;
+    int pos_mode = 1; // 0:不增强，1:轻微增强，2:中等增强，3:激进增强
+    int neg_mode = 1; // 0:不增强，1:轻微增强，2:中等增强，3:激进增强，4:放大到绝值
+
+    pos_mode = g_pos_mode;
+    neg_mode = g_neg_mode;
+
+    if (std::abs(lambda) <= m_eps) {
+        return m_eps;
+    }
+    else if (lambda > m_eps) {
+        return optimizeVpnEigenvalue_pos(lambda, alpha_grad, alpha_hessian, alpha_J, pos_mode, m_eps);
+    } else {
+        return optimizeVpnEigenvalue_neg(lambda, alpha_grad, alpha_hessian, alpha_J, neg_mode, m_eps);
+    }
+    return 0.0;
+    
+}
+
+// 输入: Q = eigenvectors (12x12), g_e = 单元梯度向量 (12维)
+// 输出: a2 = 每个特征向量方向的 g_i
+Eigen::VectorXd computeGradientProjection_vpn(
+    const Eigen::MatrixXd& eigenvectors, 
+    const Eigen::VectorXd& g)
+{
+    // g_rot = Q^T * g_e  →  梯度在特征向量上的投影
+    Eigen::VectorXd g_rot = eigenvectors.transpose() * g;
+    // 返回 a2[i] = g_rot[i]^2
+    return g_rot.array();
+}
+
+// 输入: Q = eigenvectors (12x12), g_e = 单元梯度向量 (12维)
+// 输出: a2 = 每个特征向量方向的 g_i^2
+template <typename PassiveT>
+void computeAlpha_grad( const int& k,
+    const Eigen::VectorXd& proj_g,
+    const Eigen::MatrixXd& eigenvectors, 
+    const Eigen::VectorXd& eigenvalues,
+    const double& m_eps,
+    double& alpha_grad_pos, double& alpha_grad_neg
+    )
+{
+    
+
+    // 2. 计算s_g和s_lambda
+    // S_g = Σ (g_i² / |λ_i|)   (i ∈ I_neg)
+    // S_λ = Σ |λ_i|²
+    double S_g_pos = 0.0, S_lambda_pos = 0.0;
+    double S_g_neg = 0.0, S_lambda_neg = 0.0;
+    for (size_t i = 0; i < k; ++i) {
+        if (eigenvalues[i] < 0) {
+            double abs_lambda_i = -eigenvalues[i];  // |λ_i|
+            if (proj_g(i) > 0) //同向
+            {
+                S_lambda_pos += abs_lambda_i * abs_lambda_i; // |λ_i|²
+
+                double g_i_sq = proj_g[i]*proj_g[i];                // g_i² (来自 computeGradientProjection)
+                S_g_pos += g_i_sq / (abs_lambda_i + m_eps);
+            }
+            else //异向
+            {
+                S_lambda_neg += abs_lambda_i * abs_lambda_i; // |λ_i|²
+
+                double g_i_sq = proj_g[i]*proj_g[i];                // g_i² (来自 computeGradientProjection)
+                S_g_neg += g_i_sq / (abs_lambda_i + m_eps);
+            }
+            
+            
+        }
+    }
+
+    // 3. 计算alpha_grad_pos
+    double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
+    double ratio_pos = S_g_pos / (2.0 * gamma * S_lambda_pos + m_eps);
+    
+
+    // 基于解析公式的混合策略：α = (S_g / (2γS_λ))^(1/3)，其中γ是一个超参数，需标定。
+    // 这个公式来源于变分问题的解析解，能够根据S_g和S_λ的关系自动调整混合系数，实现更智能的特征值增强。
+    // S_g越大（负特征值贡献越大,能量下降越大），S_λ越小（负特征值越小，修正代价较小），则α越大，增强效果越强。
+    alpha_grad_pos = std::pow(ratio_pos, 1.0 / 3.0);
+    // alpha_grad_pos = std::max(0.0, std::min(1.0, alpha_grad_pos));
+
+
+    // 4. 计算alpha_grad_neg
+    double ratio_neg = S_g_neg / (2.0 * gamma * S_lambda_neg + m_eps);
+    
+
+    // 基于解析公式的混合策略：α = (S_g / (2γS_λ))^(1/3)，其中γ是一个超参数，需标定。
+    // 这个公式来源于变分问题的解析解，能够根据S_g和S_λ的关系自动调整混合系数，实现更智能的特征值增强。
+    // S_g越大（负特征值贡献越大,能量下降越大），S_λ越小（负特征值越小，修正代价较小），则α越大，增强效果越强。
+    alpha_grad_neg = std::pow(ratio_neg, 1.0 / 2.0);
+    // alpha_grad_neg = std::max(0.0, std::min(1.0, alpha_grad_neg));
+
+    #if DEBUG_OUTPUT
+        TINYAD_DEBUG_OUT("proj_g:"<<proj_g.transpose() <<", gamma:"<<gamma); 
+        TINYAD_DEBUG_OUT("S_g_pos(bigger):"<<S_g_pos<<", S_lambda_pos(smaller):"<<S_lambda_pos);
+        TINYAD_DEBUG_OUT("S_g_neg(bigger):"<<S_g_neg<<", S_lambda_neg(smaller):"<<S_lambda_neg); 
+        TINYAD_DEBUG_OUT("alpha_grad_pos:"<<alpha_grad_pos<<", alpha_grad_neg:"<<alpha_grad_neg); 
+    #endif
+
+    // return alpha;
+}
+
 
 
 /**
@@ -760,6 +1160,7 @@ double optimizeEigenvalueByKappa(
     }
     return lambda;
 }
+
 
 
 /**
@@ -1000,7 +1401,7 @@ bool positive_diagonally_dominant(
 template <int k, typename PassiveT>
 void project_positive_definite(
         Eigen::Matrix<PassiveT, k, k>& _H,
-        const PassiveT& _eigenvalue_eps)
+        const PassiveT& _eigenvalue_eps) //for vpn
 {
     if constexpr (k == 0)
     {
@@ -1310,6 +1711,96 @@ double computeKappa(int kappaMethod, const Eigen::VectorXd& eigenvalues, double 
 }
 
 /**
+ * @brief 计算基于J的增强系数，范围 [0, 1]
+ * 当J<J_threshold时，alpha_J接近0; 
+ * 当J>J_threshold时，alpha_J接近1;
+ * 不要修正到0，1
+ */
+template <typename PassiveT>
+double computeAlpha_J(PassiveT& J, const double m_eps)
+{
+    double alpha_J = 1.0;
+    int method = g_j_mode;
+    switch(method) 
+    {
+        case 1:
+        {
+            double J_c  = 0.9;
+            double J_s  = 2.0;
+            double k1   = 15.0;
+            double k2   = 3.0;
+            double beta = 20.0;
+            
+            // sigmoid: 1 / (1 + exp(-x))，截断防溢出, -inf-> 0, +inf -> 1
+            auto sig = [](double x) -> double {
+                if (x >  100.0) return 1.0;
+                if (x < -100.0) return 0.0;
+                return 1.0 / (1.0 + std::exp(-x));
+            };
+
+            // ── J<0 安全因子 ──────────────────────────────────────────
+            // 当 J<0（单元翻转）时 safe≈0，强制 R→0 → alpha*=1（abs）
+            // 否则若不加此项，J<0 时 R1=sig(k1*(J_c-J))→1 会错误给出 clamp
+            double safe = sig(50.0 * J);
+
+            // ── 左右区域混合权重 ───────────────────────────────────────
+            // w≈0：J<1（压缩侧），使用 R1
+            // w≈1：J>1（拉伸侧），使用 R2
+            double w = sig(beta * (J - 1.0));
+
+            // ── 压缩侧可靠性 R1 ───────────────────────────────────────
+            // J < J_c(0.9): R1→1（高可靠，可激进）
+            // J > J_c(0.9): R1→0（低可靠，需保守）
+            double R1 = sig(k1 * (J_c - J));
+
+            // ── 拉伸侧可靠性 R2 ───────────────────────────────────────
+            // J < J_s(2.0): R2→1（高可靠，可激进）
+            // J > J_s(2.0): R2→0（低可靠，需保守）
+            double R2 = sig(k2 * (J_s - J));
+
+            // ── 合并：加权混合 + J<0安全 ──────────────────────────────
+            double R = safe * ((1.0 - w) * R1 + w * R2);
+
+            alpha_J = std::max(R, m_eps);   // 防除零
+            alpha_J = std::pow(1.0/alpha_J, 1.0/3.0); // 平滑过渡
+            break;
+        }
+        case 2:
+        {
+            double J_threshold = 0.9; // 阈值，根据实际情况调整
+            if (J < 0) {
+                alpha_J = std::min(1.0, std::max(0.0, std::abs(1.0 + J))); // J < 0 时，|J|越小越可信，刚开始翻转;
+            }
+            else if (J < J_threshold) {
+                alpha_J = std::min(1.0, std::max(0.0, 1.0 * (J - J_threshold))); // J < J_threshold 时，alpha_J=0;
+            }
+            break;
+        }
+        default:
+        {
+            double J_threshold = 0.9; // 阈值，根据实际情况调整
+            if (J < 0) {
+                #if DEBUG_OUTPUT
+                    TINYAD_DEBUG_OUT("Warning: J < 0, J: " << J); 
+                #endif
+                alpha_J = std::min(1.0, std::max(0.0, std::abs(J) / (1.0 + J_threshold))); // J < 0 时，alpha_J 线性下降，J=-1时alpha_J=0);
+            }
+            else if (J < J_threshold) {
+                alpha_J = std::min(1.0, std::max(0.0, 1.0 * (J - J_threshold))); 
+            }
+            break;
+        }
+    }
+    
+
+    #if DEBUG_OUTPUT
+        TINYAD_DEBUG_OUT("alpha_J:"<<alpha_J<<",J:"<<J);  
+        
+    #endif
+
+    return alpha_J;
+}
+/**
  * Project symmetric matrix to positive-definite matrix
  * via eigen decomposition. 
  * added by zj (Differentiable version)
@@ -1317,8 +1808,10 @@ double computeKappa(int kappaMethod, const Eigen::VectorXd& eigenvalues, double 
 template <int k, typename PassiveT>
 void project_positive_definite_diff(
         Eigen::Matrix<PassiveT, k, k>& _H,
+        const Eigen::VectorX<PassiveT>& _grad,        // ← 新增
         const PassiveT& _eigenvalue_eps,
-        HessianProjectionMode _mode = HessianProjectionMode::AUTO)
+        HessianProjectionMode _mode = HessianProjectionMode::AUTO,
+        const PassiveT& _J = PassiveT(1.0)      ) // for vpn      
 {
     // #if DEBUG_OUTPUT
     //     TINYAD_DEBUG_OUT("Projection mode in project_positive_definite_diff: " << static_cast<int>(_mode)); 
@@ -1351,20 +1844,52 @@ void project_positive_definite_diff(
             TINYAD_DEBUG_OUT("lambda_max,lambda_min:"<<lambda_max<<","<<lambda_min);   
         #endif
 
-        // if (TinyAD::isNegative(_eigenvalue_eps)
-        //     && _mode != HessianProjectionMode::CLAMP_ABS_BLENDING) // 负数表示投影到绝对值
-        // {
-        //     m_eps = 0; // 不设置下限，直接投影到绝对值
-        // }
-
         // 创建正则化器
         EigenvalueRegularizer<PassiveT> regularizer(_eigenvalue_eps,_mode);
-        //EigenvalueRegularizer<PassiveT> regularizer(m_eps,_mode);
-        // #if DEBUG_OUTPUT
-        //     TINYAD_DEBUG_OUT("_eigenvalue_eps in project_positive_definite_diff:"<<static_cast<double>(_eigenvalue_eps));   
-        // #endif
+
         bool modified = false;
-        if (_mode == HessianProjectionMode::SMOOTH_TR) 
+        
+        if (_mode == HessianProjectionMode::CLAMP_ABS_BLENDING_J)
+        {
+
+            m_eps = 1e-10;
+            // 1. 检查是否需要滤波
+            if (eigenvalues.minCoeff() > m_eps) {
+                #if DEBUG_OUTPUT
+                    TINYAD_DEBUG_OUT(" eigenvalues.minCoeff() > m_eps return"); 
+                #endif
+                return;  // 已正定，直接返回
+            } 
+
+           
+            // 2. 计算梯度投影
+            Eigen::VectorXd proj_g = computeGradientProjection_vpn(eigenvectors, _grad);
+
+            // 3. alpha
+            // int computeAlphaMethod = 1; // 1: 基于梯度投影；2:基于特征值分布；3:基于负特征值能量占比；4:基于多重判定 
+            double alpha_grad_pos = 0.0, alpha_grad_neg = 0.0;
+            computeAlpha_grad<PassiveT>(k, proj_g, eigenvectors, eigenvalues,m_eps, alpha_grad_pos, alpha_grad_neg); //element level
+            double alpha_hessian = computeAlpha_hessian(eigenvalues, m_eps); //element level
+            double alpha_J = computeAlpha_J(_J,m_eps);    //element level
+            
+            // 3. 优化每个特征值
+            for (size_t i = 0; i < k; ++i) {
+                double lambda = eigenvalues(i);
+                double new_lambda = lambda;
+                double alpha_grad = (proj_g(i) > 0) ? alpha_grad_pos : alpha_grad_neg; //与梯度同向和异向的特征值使用不同的梯度增强系数
+
+                new_lambda = optimizeVpnEigenvalue(eigenvalues[i], alpha_grad, alpha_hessian, alpha_J, m_eps);
+                
+                eigenvalues(i) = new_lambda;    
+            }
+
+            modified = true;
+            
+            if (!modified) {
+                return; // 如果没有任何特征值需要修改，直接返回
+            }
+        }
+        else if (_mode == HessianProjectionMode::SMOOTH_TR) 
         {
             // 1. 检查是否需要滤波
             if (eigenvalues.minCoeff() > m_eps) {
@@ -1949,32 +2474,6 @@ void project_positive_definite_diff(
         }
         else
         { 
-            // if (use_shift)//先shift
-            // {
-            //     double min_abs = eigenvalues.cwiseAbs().minCoeff();
-
-            //     if (TinyAD::isNegative(min_abs, TinyAD::EPS_1E_8)) //小于最小值
-            //     {
-            //        double shift_value = min_abs + TinyAD::ZERO; // 根据β调整shift 
-
-            //         for (size_t i = 0; i < k; ++i) { //先shift,再clamp，abs,blending
-            //             eigenvalues(i) += shift_value;    
-            //         }
-            //         modified = true;
-            //     }
-
-            // }
-
-            // if (_mode == HessianProjectionMode::CLAMP_ABS_NONDIFF)
-            // {
-            //     if (_eigenvalue_eps > (-1e-8)) // 只有0,-1两种取值
-            //     {
-            //         TINYAD_DEBUG_OUT("!!!!skip regularization."); 
-            //         return;
-            //     }
-                
-            // }
-
             for (Eigen::Index i = 0; i < k; ++i) {
                 PassiveT old_val = eigenvalues(i);
                 
@@ -1983,247 +2482,18 @@ void project_positive_definite_diff(
                     eigenvalues(i) = regularizer.regularize(old_val);
                     modified = true;
 
-                    // #if DEBUG_OUTPUT
-                    //     //TINYAD_DEBUG_OUT("Projection mode in project_positive_definite_diff: " << static_cast<int>(_mode));
-                    //     TINYAD_DEBUG_OUT("ev("<<i<<"):" << old_val << " -> " << eigenvalues(i)); 
-                    //     //TINYAD_DEBUG_OUT("*evec("<<i<<")=" << eigenvectors.col(i).transpose()); 
-                    // #endif
                 }
             }
             if (!modified) {
                 return; // 如果没有任何特征值需要修改，直接返回
             }
         }
-
-        #if 0
-        auto shift_value = 0.0;
-        //if (_eigenvalue_eps > 1.0)// shift
-        if (_mode == HessianProjectionMode::ABS_SHIFT_CLAMP_NONDIFF)
-        {
-            auto alpha_shear = 0.0;
-            // 找到特征值的"断点"
-            std::vector<double> vals(eigenvalues.data(), 
-                                        eigenvalues.data() + eigenvalues.size());
-            
-            // 计算剪切模态的能量占比
-            double sum_shear = 0.0;
-            double sum_total = 0.0;
-            double lambda_min = vals[0];
-            double lambda_max = vals[0];
-            for (size_t i = 0; i < vals.size(); ++i) {
-                if (std::abs(vals[i]) < 1e-4){
-                    sum_shear += std::abs(vals[i]);
-                }
-                
-                sum_total += std::abs(vals[i]); 
-                if (vals[i] < lambda_min) 
-                {
-                    lambda_min = vals[i];
-                }
-                
-                if (vals[i] > lambda_max) 
-                {
-                    lambda_max = vals[i];
-                }
-            }
-
-            alpha_shear = sum_shear / sum_total;
-            
-            
-            if (lambda_min < 0)
-            {
-                shift_value += (std::abs(lambda_min) + 1e-8);
-                lambda_min += shift_value;
-                lambda_max += shift_value;
-            }
-            double alpha_opt = std::sqrt(std::abs(lambda_min) * std::abs(lambda_max));
-        
-            // 根据剪切程度调整
-            if (alpha_shear > 0.95) {
-                // 高度剪切：需要保护小特征值
-                shift_value +=  alpha_opt * 0.1;
-            } else if (alpha_shear > 0.8) { // shear dominated
-                shift_value += alpha_opt * 0.5;
-            } else if (alpha_shear > 0.3) { // mixed
-                shift_value += alpha_opt;
-            } else {
-                // 体积主导：可以大一些加速收敛
-                shift_value += alpha_opt * 2.0;
-            }
-            #if SHEAR_DEBUG_OUTPUT
-                TINYAD_DEBUG_OUT("alpha_shear,alpha_opt,min,max,shift: "<<alpha_shear <<","<<alpha_opt<<","<<lambda_min <<","<<lambda_max <<","<<shift_value <<","); 
-            #endif
-
-            // for (Eigen::Index i = 0; i < k; ++i) {
-            //     PassiveT old_val = eigenvalues(i);
-            //     eigenvalues(i) = old_val + shift_value;
-                    
-            //     #if SHEAR_DEBUG_OUTPUT
-            //         //TINYAD_DEBUG_OUT("Projection mode in project_positive_definite_diff: " << static_cast<int>(_mode));
-            //         TINYAD_DEBUG_OUT("ev("<<i<<"):" << old_val << " -> " << eigenvalues(i)); 
-            //         //TINYAD_DEBUG_OUT("*evec("<<i<<")=" << eigenvectors.col(i).transpose()); 
-            //     #endif   
-            // }
-            //modified = true;
-        }
-        #endif
-        //else
-        #if 0
-        if (_mode == HessianProjectionMode::CLAMP_ABS_BLENDING)
-        {
-            // #if DEBUG_OUTPUT
-            //     TINYAD_DEBUG_OUT("blending: " );
-            //     //TINYAD_DEBUG_OUT("ev("<<i<<"):" << old_val << " -> " << eigenvalues(i));  
-            // #endif
-
-            double m_eps = 1e-8;
-            // TinyAD::CurvatureBetaCalculator betaCalc(1.0, 1.5, eps);
-            // auto [kappa, beta] = betaCalc.compute(eigenvalues);
-            // 或者使用体积比增强版本
-            // double J = computeDetF(F);  // 计算det(F)
-            // auto [kappa, beta] = betaCalc.computeWithJ(eigenvalues, J);
-            
-            // 将β代入变分框架，计算混合系数α
-            double kappa = 1.0;
-            double beta = 1.0;
-
-            double m_beta0 = 1.5;
-            double m_gamma = 1.5;
-
-            // 1. 计算特征值的最大值和最小值
-            double lambda_max = eigenvalues.maxCoeff();
-            double lambda_min = eigenvalues.minCoeff();
-            
-            // 2. 计算曲率度量 κ_i (方案A: 基于特征值各向异性)
-            // κ = (λ_max - λ_min) / (λ_max + λ_min + ε)
-            // 这个比值度量了Hessian的各向异性程度
-            double denominator = std::abs(lambda_max) + std::abs(lambda_min) + m_eps;
-            
-            kappa = (std::abs(lambda_max) - std::abs(lambda_min)) / denominator;
-            kappa = std::abs(kappa);  // 取绝对值，保证非负
-            
-            // 确保κ在合理范围内 [0, 1]
-            kappa = std::max(0.0, std::min(1.0, kappa));
-            
-            // 3. 计算自适应正则化参数 β_i
-            // β = β₀ * (1 + γ * κ)
-            // 曲率越大 → β越大 → 更激进的滤波（放大负特征值）
-            beta = m_beta0 * (1.0 + m_gamma * kappa);
-            #if DEBUG_OUTPUT
-                TINYAD_DEBUG_OUT("kappa, beta,lambda_min, lambda_max:"<<kappa<<"," << beta<<","<< lambda_min<<"," << lambda_max); 
-            #endif
-
-            for (size_t i = 0; i < k; ++i) {
-                double lambda = eigenvalues(i);
-                double new_lambda = lambda;
-
-                if (std::abs(lambda) <= m_eps) {
-                    // 小特征值
-                    new_lambda = m_eps;
-
-                    modified = true;
-                    #if DEBUG_OUTPUT
-                        TINYAD_DEBUG_OUT("blending ev("<<i<<"):" << lambda << " -> " << new_lambda);
-                    #endif
-                }
-                else if (lambda > m_eps) { //正特征值不做修改
-                    // // 正特征值，曲率越大，beta越大，alpha_p越小,正特征值越被弱化
-                    double numerator = beta * lambda * lambda;
-                    double denominator = 2.0 * (lambda - m_eps) * (lambda - m_eps);
-                    double alpha_p = 1.0 - numerator / denominator;
-                    
-                    // 钳位到 [0,1]
-                    alpha_p = std::max(0.0, std::min(1.0, alpha_p));
-                    
-                    // 应用混合
-                    new_lambda = alpha_p * lambda + (1.0 - alpha_p) * m_eps;
-                    #if DEBUG_OUTPUT
-                        TINYAD_DEBUG_OUT("正特征值增强系数alpha_p:"<<alpha_p); 
-                        TINYAD_DEBUG_OUT("blending ev("<<i<<"):" << lambda << " -> " << new_lambda);  
-                    #endif
-                }
-                else {
-                    // 只处理负特征值（λ < -ε）,曲率越大，beta越大，alpha_n越大，负特征值增强越大
-                    double b = -lambda;  // 绝对值
-                    
-                    // 混合系数的解析解（由变分问题导出）
-                    // α* = clamp((β·b² - 2(b² - ε²)) / (2(b - ε)²), 0, 1)
-                    //double eps = 1e-8;
-                    double numerator = beta * b * b - 2.0 * (b * b - m_eps * m_eps);
-                    double denominator = 2.0 * (b - m_eps) * (b - m_eps);
-                    double alpha_n = numerator / denominator;
-                    
-                    // 钳位到[0,1]
-                    alpha_n = std::max(0.0, std::min(1.0, alpha_n));
-                    
-                    // 应用混合策略
-                    new_lambda = alpha_n * b + (1.0 - alpha_n) * m_eps;
-                
-                    modified = true;
-                    #if DEBUG_OUTPUT
-                        TINYAD_DEBUG_OUT("负特征值增强系数alpha_n:"<<alpha_n); 
-                        TINYAD_DEBUG_OUT("blending ev("<<i<<"):" << lambda << " -> " << new_lambda);  
-                    #endif
-                }
-                eigenvalues(i) = new_lambda;
-                
-            }
-            
-            if (!modified) {
-                return; // 如果没有任何特征值需要修改，直接返回
-            }
-        }
-        #endif
-        
-        
-        
-        #if 0
-        if (modified) {
-            MatT D = eig.eigenvalues().asDiagonal();  
-
-            // Clamp all eigenvalues to eps
-            bool all_positive = true;
-            for (Eigen::Index i = 0; i < _H.rows(); ++i)
-            {
-                if (_eigenvalue_eps < 0) {
-                    // project to absolute value
-                    if (D(i, i) < 0)
-                    {
-                        D(i, i) = -D(i, i);
-                        all_positive = false;
-                    }
-                }
-                else {
-                    // project to epsilon
-                    if (D(i, i) < _eigenvalue_eps)
-                    {
-                        D(i, i) = _eigenvalue_eps;
-                        all_positive = false;
-                    }
-                }
-            }
-             
-            //check eigenvalues and D.diagonal() have the same values after regularization
-            TINYAD_DEBUG_OUT("Checking regularized eigenvalues...");
-            TINYAD_ASSERT_EQ(eigenvalues.size(), D.diagonal().size());
-            for (Eigen::Index i = 0; i < eigenvalues.size(); ++i) {
-                TINYAD_ASSERT_EPS(eigenvalues(i), D(i,i), 1e-6);
-            }
-            
-            //check eigenvectors are the same as beforeregularization
-            TINYAD_DEBUG_OUT("Checking regularized eigenvectors...");
-            TINYAD_ASSERT_EPS_MAT(eig.eigenvectors(), eigenvectors, 1e-6);   
-        }
-        #endif 
 
         if (modified) {
             _H = eigenvectors * eigenvalues.asDiagonal() * eigenvectors.transpose();
-            //TINYAD_ASSERT_FINITE_MAT(_H);
-            // TINYAD_DEBUG_OUT("regularized element hessian +1");
+            g_reg_element_num++;
         }
-
-        //#endif
-       
+   
     }
 }
 
@@ -2236,8 +2506,10 @@ void project_positive_definite_diff(
 template < typename PassiveT>
 void project_positive_definite_diff(
         Eigen::MatrixX<PassiveT>& _H,
+        const Eigen::VectorX<PassiveT>& _grad,        // ← 新增
         const PassiveT& _eigenvalue_eps,
-        HessianProjectionMode _mode = HessianProjectionMode::AUTO)
+        HessianProjectionMode _mode = HessianProjectionMode::AUTO,
+        const PassiveT& _J  =  PassiveT(1.0)      ) // for vpn
 {
     // #if DEBUG_OUTPUT
     //     TINYAD_DEBUG_OUT("Projection mode in project_positive_definite_diff: " << static_cast<int>(_mode)); 

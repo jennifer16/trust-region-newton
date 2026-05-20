@@ -115,7 +115,6 @@ namespace TinyAD
         CLAMP_ABS_BLENDING4 = 18,
         CLAMP_ABS_BLENDING3 = 19,
         CLAMP_ABS_BLENDING5 = 20,
-        CLAMP_ABS_BLENDING_J = 21,
     };
 
     // // 构造函数：可以配置不同的行为

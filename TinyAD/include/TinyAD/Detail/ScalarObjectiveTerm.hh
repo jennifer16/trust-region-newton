@@ -10,6 +10,8 @@
 #include <TinyAD/Detail/EvalSettings.hh>
 #include <TinyAD/Utils/HessianProjection.hh>
 
+#include "../../../include/ElementDeformationState.h"  // 或项目 include 路径
+
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -192,7 +194,7 @@ struct ScalarObjectiveTerm : ScalarObjectiveTermBase<PassiveT>
             //to do, 特征值为负的时候再修正
             Eigen::MatrixXd element_Hess = element_results[i_element].Hess;
             auto b_positive = positive_diagonally_dominant<PassiveT>(element_Hess, _projection_eps);
-            
+            double J_val = g_element_J[i_element];
             if (_project_hessian && (!b_positive)) //非正定
             {
                 auto &H_local = element_results[i_element].Hess;
@@ -242,6 +244,7 @@ struct ScalarObjectiveTerm : ScalarObjectiveTermBase<PassiveT>
                         
 
                         auto mode  = get_projection_mode();
+                        
                         
                         if (mode == HessianProjectionMode::ABS_NONDIFF)
                         {
@@ -309,7 +312,9 @@ struct ScalarObjectiveTerm : ScalarObjectiveTermBase<PassiveT>
                             // #if DEBUG_OUTPUT
                             // //TINYAD_DEBUG_OUT("Projection mode in eval_with_derivatives_add: " << static_cast<int>(get_projection_mode())); 
                             // #endif
-                            project_positive_definite_diff<n_element, PassiveT>(element_results[i_element].Hess, _projection_eps, get_projection_mode());
+                            project_positive_definite_diff<n_element, PassiveT>(element_results[i_element].Hess, 
+                                element_results[i_element].grad,   // ← 新增：传入真实梯度
+                                _projection_eps, get_projection_mode(), J_val);
                         #else       
                             // project_positive_definite_with_inv_g<n_element, PassiveT>(element_results[i_element].Hess, element_results[i_element].grad, _projection_eps);
                             project_positive_definite<n_element, PassiveT>(element_results[i_element].Hess, _projection_eps);
@@ -321,35 +326,28 @@ struct ScalarObjectiveTerm : ScalarObjectiveTermBase<PassiveT>
                 else 
                 {
                     #ifdef DIFF_PROJECTED_NEWTON
-                        // if (i_element == 660 // free 3
-                        //     || i_element == 663   
-                        //     || i_element == 661   // free 6
-                        //     || i_element == 1
-                        //     || i_element == 2 // free 9
-                        //     || i_element == 924) 
-                        if (i_element == 660 )    
-                        {
-                            TINYAD_DEBUG_OUT("modify partial free element: " << i_element); 
-                            TINYAD_DEBUG_OUT("H_local(original): " << element_results[i_element].Hess); 
-                        }
-                        project_positive_definite_diff<n_element, PassiveT>(element_results[i_element].Hess, _projection_eps, get_projection_mode());
+                        
+                        // if (i_element == 660 )    
+                        // {
+                        //     TINYAD_DEBUG_OUT("modify partial free element: " << i_element); 
+                        //     TINYAD_DEBUG_OUT("H_local(original): " << element_results[i_element].Hess); 
+                        // }
+                        project_positive_definite_diff<n_element, PassiveT>(element_results[i_element].Hess, 
+                            element_results[i_element].grad,   // ← 新增：传入真实梯度
+                            _projection_eps, get_projection_mode(), J_val);
                     
-                        // if (i_element == 660 // free 3
-                            // || i_element == 663   
-                            // || i_element == 661   // free 6
-                            // || i_element == 1
-                            // || i_element == 2 // free 9
-                            // || i_element == 924) 
-                        if (i_element == 660 ) 
-                        {
-                            TINYAD_DEBUG_OUT("modify partial free element: " << i_element); 
-                            TINYAD_DEBUG_OUT("H_local(modified): " << element_results[i_element].Hess); 
-                        }
+                         
+                        // if (i_element == 660 ) 
+                        // {
+                        //     TINYAD_DEBUG_OUT("modify partial free element: " << i_element); 
+                        //     TINYAD_DEBUG_OUT("H_local(modified): " << element_results[i_element].Hess); 
+                        // }
 
                     #else       
                         // project_positive_definite_with_inv_g<n_element, PassiveT>(element_results[i_element].Hess, element_results[i_element].grad, _projection_eps);
                         project_positive_definite<n_element, PassiveT>(element_results[i_element].Hess, _projection_eps);
                     #endif
+                    
                 }
                
             }
