@@ -134,6 +134,7 @@ namespace TinyAD
     // inline变量可以直接在头文件中定义
     inline int g_MU = 1;
     inline double g_LAMBDA = 1;
+    inline double g_avg_vol_energy = 0;
 
     inline const double EPS_1E_8 = 1e-8;   // 单精度浮点误差，通常够用
     inline const double EPS_1E_12 = 1e-12; // 双精度浮点误差

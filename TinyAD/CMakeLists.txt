@@ -38,7 +38,7 @@ if (TARGET OpenMP::OpenMP_CXX)
 endif()
 
 # Create unit tests target
-option(TINYAD_UNIT_TESTS "" OFF)
+option(TINYAD_UNIT_TESTS "" OFF) #zj
 if (${TINYAD_UNIT_TESTS})
     enable_testing()
 
@@ -64,6 +64,12 @@ if (${TINYAD_UNIT_TESTS})
         set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
         FetchContent_MakeAvailable(googletest)
     endif()
+
+    # # 方案1：只包含指定的测试文件
+    # set(TINYAD_TEST_SOURCES 
+    #     tests/HessianProjectionTest.cc  # 只运行这个测试
+    #     # tests/test_other.cc              # 可以添加其他需要的测试
+    # )
 
     file(GLOB_RECURSE TINYAD_TEST_HEADERS tests/*.hh)
     file(GLOB_RECURSE TINYAD_TEST_SOURCES tests/*.cc)

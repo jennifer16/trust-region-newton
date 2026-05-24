@@ -98,6 +98,11 @@ double g_para_gamma = 2.0; // 初始化 g_para_gamma
 int g_pos_mode = 1; // 0-5, 0:不增强，1:轻微增强，2:中等增强，
 int g_neg_mode = 1; // 0-11, 0:clamp，1:grad，4:grad+hessian，5:abs，6:翻转安全+放大到绝值，7:翻转安全+激进增强，8:翻转安全+中等增强，9:放大到绝值但不翻转安全，10:激进增强但不翻转安全，11:中等增强但不翻转安全
 int g_j_mode = 1; // 1-2 new, 其他 old
+// double g_MU;
+int g_update_gamma_mode;
+int g_eta_mode;
+int g_kappa_mode;
+int g_grad_mode;
 
 // void stop_recording(int frame_count_, const std::string& output_dir_) {
     
@@ -2134,6 +2139,8 @@ int shear_reg_projected_newton(int argc, char** argv)
 
         x0 = x;
 
+
+
         // if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING2)
         // {
         //   if (trust_region_ratio >= prev_ratio + tr_threshold) {
@@ -2379,6 +2386,104 @@ int shear_reg_projected_newton(int argc, char** argv)
   return 0;
 }
 
+double compute_mesh_volume( Eigen::MatrixXd& V,  Eigen::MatrixXi& F)
+{
+    double volume = 0.0;
+    for (int i = 0; i < F.rows(); ++i)
+    {
+        // 从矩阵中获取顶点坐标
+        Eigen::Vector3d a = V.row(F(i, 0));
+        Eigen::Vector3d b = V.row(F(i, 1));
+        Eigen::Vector3d c = V.row(F(i, 2));
+        Eigen::Vector3d d = V.row(F(i, 3));
+        
+        Eigen::Matrix3d M;
+        M.col(0) = b - a;
+        M.col(1) = c - a;
+        M.col(2) = d - a;
+        
+        volume += std::abs(M.determinant()) / 6.0;
+    }
+    return volume;
+}
+
+void update_global_gamma(int n_v, const double energy, 
+  const Eigen::VectorXd& g, const Eigen::MatrixXd& H_proj,
+  double prev_ratio, double tr_threshold, int mode)
+{
+  double t_eps = 1e-10;
+  double g_norm = g.norm()/n_v; // average gradient norm per variable, to make it less sensitive to problem size
+  double H_proj_norm = H_proj.norm()/n_v; // average Hessian norm per variable, to make it less sensitive to problem size
+  switch(mode)
+  {
+    case 0:
+    {
+      g_para_gamma = H_proj_norm/(g_norm + t_eps); // 可以根据tr_ratio调整gamma
+      break;
+    }
+    case -1:
+    {
+      g_para_gamma = (g_norm*g_norm)/(H_proj_norm * H_proj_norm * H_proj_norm + t_eps); // 可以根据tr_ratio调整gamma
+      break;
+    }
+    case -2:
+    {
+      g_para_gamma = std::abs(energy/n_v)/(H_proj_norm * H_proj_norm  + t_eps); // 可以根据tr_ratio调整gamma 
+      break;
+    }
+    case -3:
+    {
+      g_para_gamma = g_norm/(H_proj_norm + t_eps); // 可以根据tr_ratio调整gamma
+      break;
+    }
+    case -4:
+    {
+      double s_gamma = std::abs(energy/n_v)/(H_proj_norm * H_proj_norm  + t_eps); 
+      double d_gamma = g_para_gamma;
+      if(std::fabs(prev_ratio-1.0) < tr_threshold)// >0.9模型保守，放大gamma >1，趋向clamp
+      {
+        d_gamma *=  10.0;
+      }
+      
+      g_para_gamma = std::max(s_gamma, d_gamma); // 可以根据tr_ratio调整gamma 
+      break;
+    }
+    case -5:
+    {
+      double s_gamma = std::abs(energy/n_v)/(H_proj_norm   + t_eps); 
+      double d_gamma = g_para_gamma;
+      
+      g_para_gamma = std::max(s_gamma, d_gamma); // 可以根据tr_ratio调整gamma 
+      break;
+    }
+    case -6:
+    {
+      double s_gamma = std::abs(energy/n_v)/(H_proj_norm   + t_eps); 
+      double d_gamma = g_para_gamma;
+      
+      if(std::fabs(prev_ratio-1.0) < tr_threshold)// >0.9模型保守，放大gamma >1，趋向clamp
+      {
+        d_gamma *=  10.0;
+      }
+
+      g_para_gamma = std::max(s_gamma, d_gamma); // 可以根据tr_ratio调整gamma 
+      break;
+    }
+    case -21:
+    {
+      g_para_gamma = std::abs(energy*n_v)/(4*H_proj_norm * H_proj_norm  + t_eps); // 可以根据tr_ratio调整gamma 
+      break;
+    }
+    case -11:
+    {
+      g_para_gamma = (g_norm*g_norm*n_v)/(4*H_proj_norm * H_proj_norm * H_proj_norm + t_eps); // 可以根据tr_ratio调整gamma 
+      break;
+    }
+
+  }
+  
+}
+
 // copy from shear_reg_projected_newton
 // test for deformation F/J
 int vpn_reg_projected_newton(int argc, char** argv)
@@ -2413,7 +2518,10 @@ int vpn_reg_projected_newton(int argc, char** argv)
     ("para_pos_mode", "choose positive eigenvalue blending mode", cxxopts::value<int>()->default_value("0")) // "none", "shear", "blend", "blend_smooth", "blend2", "blend3", "blend4", "blend5"
     ("para_neg_mode", "choose negative eigenvalue projection mode", cxxopts::value<int>()->default_value("0")) // "none", "clamp", "abs", "clamp_abs_blending"
     ("para_j_mode", "choose Jacobian eigenvalue projection mode", cxxopts::value<int>()->default_value("0")) // "none", "shear", "blend", "blend_smooth", "blend2", "blend3", "blend4", "blend5"
-    
+    ("update_gamma_mode", "choose positive eigenvalue blending mode", cxxopts::value<int>()->default_value("0")) // "none", "shear", "blend", "blend_smooth", "blend2", "blend3", "blend4", "blend5"
+    ("eta_mode", "choose negative eigenvalue projection mode", cxxopts::value<int>()->default_value("0")) // "none", "clamp", "abs", "clamp_abs_blending"
+    ("kappa_mode", "choose Jacobian eigenvalue projection mode", cxxopts::value<int>()->default_value("0")) // "none", "shear", "blend", "blend_smooth", "blend2", "blend3", "blend4", "blend5"
+    ("grad_mode", "choose Jacobian eigenvalue projection mode", cxxopts::value<int>()->default_value("0")) // "none", "shear", "blend", "blend_smooth", "blend2", "blend3", "blend4", "blend5"
     ("h,help", "show help")
     ;
   
@@ -2465,6 +2573,12 @@ int vpn_reg_projected_newton(int argc, char** argv)
   g_pos_mode = result["para_pos_mode"].as<int>();
   g_neg_mode = result["para_neg_mode"].as<int>();
   g_j_mode = result["para_j_mode"].as<int>();
+
+
+  g_update_gamma_mode = result["update_gamma_mode"].as<int>();
+  g_eta_mode = result["eta_mode"].as<int>();
+  g_kappa_mode = result["kappa_mode"].as<int>();
+  g_grad_mode = result["grad_mode"].as<int>();
 
   /*
   * 0: clamp
@@ -2586,6 +2700,7 @@ int vpn_reg_projected_newton(int argc, char** argv)
   const double MU = YM / (2 * (1 + PR));
   const double LAMBDA = YM * PR / ((1 + PR) * (1 - 2 * PR));
   const double lambda_mu_ratio = LAMBDA / MU;
+  TinyAD::g_MU = MU;
  
   // print out the configuration
   {
@@ -2613,7 +2728,10 @@ int vpn_reg_projected_newton(int argc, char** argv)
     TINYAD_DEBUG_OUT("para_pos_mode: " << g_pos_mode);
     TINYAD_DEBUG_OUT("para_neg_mode: " << g_neg_mode);
     TINYAD_DEBUG_OUT("para_j_mode: " << g_j_mode);
-
+    TINYAD_DEBUG_OUT("update_gamma_mode: " << g_update_gamma_mode);
+    TINYAD_DEBUG_OUT("eta_mode: " << g_eta_mode);
+    TINYAD_DEBUG_OUT("kappa_mode: " << g_kappa_mode);
+    TINYAD_DEBUG_OUT("grad_mode: " << g_grad_mode);
   }
 
   Eigen::MatrixXd V, U; // #V-by-3 3D vertex positions,V为初始,U为当前
@@ -2628,6 +2746,7 @@ int vpn_reg_projected_newton(int argc, char** argv)
     exit(1);
   }
 
+  
   TINYAD_DEBUG_OUT("Read mesh with " << V.rows() << " vertices and " << F.rows() << " tetrahedrons.");
 
   // get boundary vertices
@@ -2653,6 +2772,8 @@ int vpn_reg_projected_newton(int argc, char** argv)
   setup_initial_deformation(V, F, pose_label, deformation_magnitude, deformation_ratio, rotate_ratio, fixed_boundary_range, U, indices_fixed);
   fixed_point_constraints(P, 3*V.rows(), 3, indices_fixed);
   g_element_J.resize(F.rows());
+
+  double volume = compute_mesh_volume(V, F);
 
   TINYAD_DEBUG_OUT("Finish setting up fixed point constraints.");
 
@@ -2947,6 +3068,10 @@ int vpn_reg_projected_newton(int argc, char** argv)
         
         g_reg_element_num = 0;
 
+        double current_energy = hist.empty() ? initial_energy : hist.back();
+        
+        TinyAD::g_avg_vol_energy = current_energy/(volume + 1e-8);
+
         auto [f, g, H_proj] = func.eval_with_hessian_proj(x, eps, _diff_mode); // 
         Eigen::SparseMatrix<double> H0 = func.eval_hessian(x); // 计算未投影的Hessian，用于后续计算牛顿下降量和牛顿下降量
 
@@ -2970,56 +3095,7 @@ int vpn_reg_projected_newton(int argc, char** argv)
 
         if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING_J)
         {
-          double t_eps = 1e-10;
-          double g_norm = g.norm()/V.rows(); // average gradient norm per variable, to make it less sensitive to problem size
-          double H_proj_norm = H_proj.norm()/V.rows(); // average Hessian norm per variable, to make it less sensitive to problem size
-          if (para_gamma == 0)
-          {
-            g_para_gamma = H_proj_norm/(g_norm + t_eps); // 可以根据tr_ratio调整gamma 
-          }
-          else if (para_gamma == -1)
-          {
-            g_para_gamma = (g_norm*g_norm)/(H_proj_norm * H_proj_norm * H_proj_norm + t_eps); // 可以根据tr_ratio调整gamma 
-          }
-          else if (para_gamma == -2)
-          {
-            g_para_gamma = std::abs(f/V.rows())/(H_proj_norm * H_proj_norm  + t_eps); // 可以根据tr_ratio调整gamma 
-          }
-          else if (para_gamma == -3)
-          {
-            g_para_gamma = g_norm/(H_proj_norm + t_eps); // 可以根据tr_ratio调整gamma 
-          }
-          else if (para_gamma == -4)
-          {
-            double s_gamma = std::abs(f/V.rows())/(H_proj_norm * H_proj_norm  + t_eps); 
-            double d_gamma = g_para_gamma;
-            if(std::fabs(prev_ratio-1.0) < tr_threshold)// >0.9模型保守，放大gamma >1，趋向clamp
-            {
-              d_gamma *=  10.0;
-            }
-            
-            g_para_gamma = std::max(s_gamma, d_gamma); // 可以根据tr_ratio调整gamma 
-          }
-          else if (para_gamma == -5)
-          {
-            double s_gamma = std::abs(f/V.rows())/(H_proj_norm   + t_eps); 
-            double d_gamma = g_para_gamma;
-            
-            g_para_gamma = std::max(s_gamma, d_gamma); // 可以根据tr_ratio调整gamma 
-          }
-          else if (para_gamma == -6)
-          {
-            double s_gamma = std::abs(f/V.rows())/(H_proj_norm   + t_eps); 
-            double d_gamma = g_para_gamma;
-            
-            if(std::fabs(prev_ratio-1.0) < tr_threshold)// >0.9模型保守，放大gamma >1，趋向clamp
-            {
-              d_gamma *=  10.0;
-            }
-
-            g_para_gamma = std::max(s_gamma, d_gamma); // 可以根据tr_ratio调整gamma 
-          }
-  
+          update_global_gamma(V.rows(), current_energy, g, H_proj, prev_ratio,tr_threshold, std::round(para_gamma));
         }
 
         TINYAD_DEBUG_OUT("delta_f_norm in iteration " << i << ": " << delta_f_norm);
@@ -3101,6 +3177,9 @@ int vpn_reg_projected_newton(int argc, char** argv)
         TINYAD_DEBUG_OUT("Energy decreased, energy descrease ratio: " << energy_descrease <<","<< hist_energy_injection_ratio2.back());
 
         x0 = x;
+
+
+        
 
         // if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING2)
         // {
@@ -3224,6 +3303,12 @@ int vpn_reg_projected_newton(int argc, char** argv)
       std::vector<int> arr_g_pos_mode = {g_pos_mode};
       std::vector<int> arr_g_neg_mode = {g_neg_mode};
       std::vector<int> arr_g_j_mode = {g_j_mode};
+      
+      std::vector<int> arr_g_update_gamma_mode = {g_update_gamma_mode};
+      std::vector<int> arr_g_eta_mode = {g_eta_mode};
+      std::vector<int> arr_g_kappa_mode = {g_kappa_mode};
+      std::vector<int> arr_g_grad_mode = {g_grad_mode};
+
 
       // 使用
       const std::string results_file_csv = "../results/results_compare.csv";
@@ -3242,7 +3327,11 @@ int vpn_reg_projected_newton(int argc, char** argv)
             .add(arr_diff_mode_str)
             .add(arr_g_pos_mode) //new
             .add(arr_g_neg_mode)
-            .add(arr_g_j_mode) //new
+            .add(arr_g_j_mode) 
+            .add(arr_g_update_gamma_mode)
+            .add(arr_g_eta_mode) 
+            .add(arr_g_kappa_mode)
+            .add(arr_g_grad_mode) 
             .add(arr_iter) 
             .add(hist_gamma) //new end
             .add(hist) //vector energy
@@ -3330,7 +3419,7 @@ int vpn_reg_projected_newton(int argc, char** argv)
 
   std::string title = experiment_folder.erase(0,7).erase(experiment_folder.size()-15)+ "_" + diff_mode_str.c_str() ;
   title += "_" + std::to_string(deformation_ratio) + "_" + std::to_string(rotate_ratio)+ "_" + std::to_string(deformation_magnitude);
-
+  title += "_" + std::to_string(g_grad_mode) +"_" + std::to_string(g_update_gamma_mode)+"_" + std::to_string(g_eta_mode);
   viewer.callback_pre_draw = [&] (igl::opengl::glfw::Viewer& viewer)
   {
     // 检查是否应该执行迭代

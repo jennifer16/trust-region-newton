@@ -332,10 +332,14 @@ struct ScalarObjectiveTerm : ScalarObjectiveTermBase<PassiveT>
                         //     TINYAD_DEBUG_OUT("modify partial free element: " << i_element); 
                         //     TINYAD_DEBUG_OUT("H_local(original): " << element_results[i_element].Hess); 
                         // }
-                        project_positive_definite_diff<n_element, PassiveT>(element_results[i_element].Hess, 
+                        
+                        // project_positive_definite_diff<n_element, PassiveT>(element_results[i_element].Hess, 
+                        //     element_results[i_element].grad,   // ← 新增：传入真实梯度
+                        //     _projection_eps, get_projection_mode(), J_val);
+                            
+                        project_positive_definite_diff_energy<n_element, PassiveT>(element_results[i_element].Hess, 
                             element_results[i_element].grad,   // ← 新增：传入真实梯度
-                            _projection_eps, get_projection_mode(), J_val);
-                    
+                            _projection_eps, get_projection_mode(), J_val, element_results[i_element].val);
                          
                         // if (i_element == 660 ) 
                         // {

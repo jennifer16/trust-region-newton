@@ -28,6 +28,26 @@ target_link_libraries(test_cubic_regular
     GTest::gtest_main
 )
 
+# ===========================================
+
+# 单元测试3
+add_executable(test_HessianProjection
+    unit_tests/test_HessianProjection.cpp
+)
+
+#include directories
+include_directories(/usr/include/eigen3)
+include_directories(${PROJECT_SOURCE_DIR}/include)
+include_directories(${PROJECT_SOURCE_DIR}/TinyAD)
+# include_directories(${PROJECT_SOURCE_DIR}/TinyAD/include/TinyAD/Utils)
+
+
+target_link_libraries(test_HessianProjection
+    GTest::gtest
+    GTest::gtest_main
+    TinyAD
+)
+
 # add_executable(test_fsfem_data
 #     unit_tests/test_fsfem_data.cpp
 # )
@@ -43,4 +63,4 @@ target_link_libraries(test_cubic_regular
 include(GoogleTest)
 gtest_discover_tests(test_mesh_ops)
 gtest_discover_tests(test_cubic_regular)
-# gtest_discover_tests(test_fsfem_data)
+gtest_discover_tests(test_HessianProjection)
