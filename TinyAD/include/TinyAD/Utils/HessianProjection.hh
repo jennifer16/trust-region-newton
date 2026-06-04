@@ -4504,6 +4504,7 @@ void project_positive_definite_diff(
             _H = eigenvectors * eigenvalues.asDiagonal() * eigenvectors.transpose();
             //TINYAD_ASSERT_FINITE_MAT(_H);
             // TINYAD_DEBUG_OUT("regularized element hessian +1");
+            g_reg_element_num++;
         }
 
         //#endif

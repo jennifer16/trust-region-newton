@@ -2412,7 +2412,9 @@ void update_global_gamma(int n_v, const double energy,
   double prev_ratio, double tr_threshold, int mode)
 {
   double t_eps = 1e-10;
+  double g_norm_o = g.norm();
   double g_norm = g.norm()/n_v; // average gradient norm per variable, to make it less sensitive to problem size
+  double H_proj_norm_o = H_proj.norm(); // average Hessian norm per variable, to make it less sensitive to problem size
   double H_proj_norm = H_proj.norm()/n_v; // average Hessian norm per variable, to make it less sensitive to problem size
   switch(mode)
   {
@@ -2477,6 +2479,16 @@ void update_global_gamma(int n_v, const double energy,
     case -11:
     {
       g_para_gamma = (g_norm*g_norm*n_v)/(4*H_proj_norm * H_proj_norm * H_proj_norm + t_eps); // 可以根据tr_ratio调整gamma 
+      break;
+    }
+    case -13:
+    {
+      g_para_gamma = (g_norm_o*g_norm_o)/(H_proj_norm_o * H_proj_norm_o * H_proj_norm_o + t_eps); // 可以根据tr_ratio调整gamma
+      break;
+    }
+    case -23:
+    {
+      g_para_gamma = std::abs(energy)/(H_proj_norm_o * H_proj_norm_o  + t_eps); // 可以根据tr_ratio调整gamma 
       break;
     }
 
@@ -2904,19 +2916,24 @@ int vpn_reg_projected_newton(int argc, char** argv)
       std::vector<int> hist_line_search_iter; // 记录每次迭代的线搜索迭代次数
 
       std::vector<double> hist_energy_injection_ratio1;
-      hist_energy_injection_ratio1.push_back(0.0);
+      // hist_energy_injection_ratio1.push_back(0.0);
       std::vector<double> hist_energy_injection_ratio2;
-      hist_energy_injection_ratio2.push_back(0.0);
+      // hist_energy_injection_ratio2.push_back(0.0);
 
       std::vector<double> hist_gamma;
-      //hist_gamma.push_back(para_gamma);
+      hist_gamma.push_back(g_para_gamma);
       std::vector<double> hist_reg_element_ratio;
       //hist_reg_element_ratio.push_back(0.0);
       std::vector<double> hist_obj_func_energy;
-      std::vector<double> hist_obj_func_f_norm;
+      std::vector<double> hist_obj_func_H_norm;
       std::vector<double> hist_obj_func_total;
+      std::vector<double> hist_obj_func_quotient;
       std::vector<double> hist_obj_func_energy_ratio;
-      std::vector<double> hist_obj_func_f_norm_ratio;
+      std::vector<double> hist_obj_func_H_norm_ratio;
+      std::vector<double> hist_energy_descrease_by_ls;
+
+      std::vector<double> hist_obj_func_total2; //g^2+h^3
+      std::vector<double> hist_obj_func_quotient2; // g^2/H^3
       
       //double cubic_sigma = 0.0;
       //Eigen::VectorXd cubic_lambda_vec = Eigen::VectorXd::Zero();
@@ -2977,7 +2994,7 @@ int vpn_reg_projected_newton(int argc, char** argv)
           else {
             TINYAD_DEBUG_OUT("Switch to abs");
           }
-          hist_trust_region_eps.push_back(eps);
+          // hist_trust_region_eps.push_back(eps);
         }
 
         //ok, beta0 adaptive
@@ -3038,7 +3055,7 @@ int vpn_reg_projected_newton(int argc, char** argv)
           }
             
           TINYAD_DEBUG_OUT("eps: "<<eps); 
-          hist_trust_region_eps.push_back(eps);
+          // hist_trust_region_eps.push_back(eps);
         }
       
         if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING_SHEAR )
@@ -3063,9 +3080,9 @@ int vpn_reg_projected_newton(int argc, char** argv)
           //   g_para_gamma = (std::fabs(hist_trust_region_ratio.back() - 1.0) < tr_threshold) ? 0.0 : 2.0; // 可以根据tr_ratio调整gamma
           //   TINYAD_DEBUG_OUT("para_gamma: "<<g_para_gamma); 
           // }
-          hist_trust_region_eps.push_back(eps);
+          
         }
-        
+        hist_trust_region_eps.push_back(eps);
         g_reg_element_num = 0;
 
         double current_energy = hist.empty() ? initial_energy : hist.back();
@@ -3083,27 +3100,37 @@ int vpn_reg_projected_newton(int argc, char** argv)
         // record the energy
         hist.push_back(f);
 
-        hist_reg_element_ratio.push_back(g_reg_element_num / F.rows());
+        hist_reg_element_ratio.push_back(g_reg_element_num * 1.0 / F.rows());
         hist_gamma.push_back(g_para_gamma);
-        double delta_f_norm = (H0-H_proj).norm();
-        hist_obj_func_f_norm.push_back(delta_f_norm); //old-new
-        hist_obj_func_f_norm_ratio.push_back(delta_f_norm/H0.norm()); //old-new
+        double delta_H_norm = (H0-H_proj).norm();
+        double delta_H_square_norm = delta_H_norm * delta_H_norm;
+        hist_obj_func_H_norm.push_back(delta_H_square_norm); //old-new
+        hist_obj_func_H_norm_ratio.push_back(delta_H_norm/(H0.norm()+ TinyAD::ZERO)); //old-new
         double delta_energy = prev_energy-f;
         hist_obj_func_energy.push_back(delta_energy);
-        hist_obj_func_energy_ratio.push_back(delta_energy/initial_energy);
-        hist_obj_func_total.push_back(delta_energy + g_para_gamma * delta_f_norm); // total obj func with energy and regularization
+        hist_obj_func_energy_ratio.push_back(delta_energy/(initial_energy+ TinyAD::ZERO));
+        hist_obj_func_total.push_back(delta_energy +  delta_H_square_norm); // total obj func with energy and regularization
+        hist_obj_func_quotient.push_back(delta_energy / (delta_H_square_norm + TinyAD::ZERO));
+        
+        double delta_H_tri_norm = delta_H_norm * delta_H_square_norm;
+        double g_square_norm = g.squaredNorm();
+        hist_obj_func_total2.push_back(g_square_norm +  delta_H_tri_norm); // total obj func with energy and regularization
+        hist_obj_func_quotient2.push_back(g_square_norm / (delta_H_tri_norm + TinyAD::ZERO));
 
+        
+
+        TINYAD_DEBUG_OUT("delta_H_norm in iteration " << i << ": " << delta_H_norm);
+        TINYAD_DEBUG_OUT("delta_energy in iteration " << i << ": " << delta_energy);
+        TINYAD_DEBUG_OUT("delta_obj_func(sum) in iteration " << i << ": " << hist_obj_func_total.back()); 
+        TINYAD_DEBUG_OUT("delta_obj_func(quotient) in iteration " << i << ": " << hist_obj_func_quotient.back()); 
+        TINYAD_DEBUG_OUT("g_para_gamma in iteration " << i << ": " << g_para_gamma); 
+        TINYAD_DEBUG_OUT("reg_element_ratio in iteration " << i << ": " << hist_reg_element_ratio.back()); 
+
+        TINYAD_DEBUG_OUT("Energy in iteration " << i << ": " << f);
         if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING_J)
         {
           update_global_gamma(V.rows(), current_energy, g, H_proj, prev_ratio,tr_threshold, std::round(para_gamma));
         }
-
-        TINYAD_DEBUG_OUT("delta_f_norm in iteration " << i << ": " << delta_f_norm);
-        TINYAD_DEBUG_OUT("delta_energy in iteration " << i << ": " << delta_energy);
-        TINYAD_DEBUG_OUT("delta_obj_func in iteration " << i << ": " << hist_obj_func_total.back()); 
-        TINYAD_DEBUG_OUT("g_para_gamma in iteration " << i << ": " << g_para_gamma); 
-
-        TINYAD_DEBUG_OUT("Energy in iteration " << i << ": " << f);
 
         H = H_proj;
         
@@ -3159,6 +3186,7 @@ int vpn_reg_projected_newton(int argc, char** argv)
         // compute the trust region ratio
         double trust_region_ratio = compute_trust_region_ratio(func.eval(x), f, alpha*d, g, H0); // 计算信赖域比率，评估模型预测的准确性
         hist_trust_region_ratio.push_back(trust_region_ratio);
+        hist_energy_descrease_by_ls.push_back(f - func.eval(x));
 
         TINYAD_DEBUG_OUT("Trust region ratio: " << trust_region_ratio);
 
@@ -3258,15 +3286,15 @@ int vpn_reg_projected_newton(int argc, char** argv)
         std::ostream_iterator<double> output_reg_element_ratio(output_file_reg_element_ratio, "\n");
         std::copy(std::begin(hist_reg_element_ratio), std::end(hist_reg_element_ratio), output_reg_element_ratio);
 
-        std::ofstream output_file_obj_func_f_norm(output_folder + "obj_func/" + "f_norm.txt");
-        std::ostream_iterator<double> output_obj_func_f_norm(output_file_obj_func_f_norm, "\n");
-        std::copy(std::begin(hist_obj_func_f_norm), std::end(hist_obj_func_f_norm), output_obj_func_f_norm);
+        std::ofstream output_file_obj_func_H_norm(output_folder + "obj_func/" + "H_norm.txt");
+        std::ostream_iterator<double> output_obj_func_H_norm(output_file_obj_func_H_norm, "\n");
+        std::copy(std::begin(hist_obj_func_H_norm), std::end(hist_obj_func_H_norm), output_obj_func_H_norm);
 
         
 
-        std::ofstream output_file_obj_func_f_norm_ratio(output_folder + "obj_func/" + "f_norm_ratio.txt");
+        std::ofstream output_file_obj_func_f_norm_ratio(output_folder + "obj_func/" + "H_norm_ratio.txt");
         std::ostream_iterator<double> output_obj_func_f_norm_ratio(output_file_obj_func_f_norm_ratio, "\n");
-        std::copy(std::begin(hist_obj_func_f_norm_ratio), std::end(hist_obj_func_f_norm_ratio), output_obj_func_f_norm_ratio);
+        std::copy(std::begin(hist_obj_func_H_norm_ratio), std::end(hist_obj_func_H_norm_ratio), output_obj_func_f_norm_ratio);
 
         std::ofstream output_file_obj_func_energy(output_folder + "obj_func/" + "energy.txt");
         std::ostream_iterator<double> output_obj_func_energy(output_file_obj_func_energy, "\n");
@@ -3279,6 +3307,25 @@ int vpn_reg_projected_newton(int argc, char** argv)
         std::ofstream output_file_obj_func_total(output_folder + "obj_func/" + "obj_func_total.txt");
         std::ostream_iterator<double> output_obj_func_total(output_file_obj_func_total, "\n");
         std::copy(std::begin(hist_obj_func_total), std::end(hist_obj_func_total), output_obj_func_total);
+
+        std::ofstream output_file_obj_func_quotient(output_folder + "obj_func/" + "obj_func_quotient.txt");
+        std::ostream_iterator<double> output_obj_func_quotient(output_file_obj_func_quotient, "\n");
+        std::copy(std::begin(hist_obj_func_quotient), std::end(hist_obj_func_quotient), output_obj_func_quotient);
+
+        std::ofstream output_file_obj_func_total2(output_folder + "obj_func/" + "obj_func_total2.txt");
+        std::ostream_iterator<double> output_obj_func_total2(output_file_obj_func_total2, "\n");
+        std::copy(std::begin(hist_obj_func_total2), std::end(hist_obj_func_total2), output_obj_func_total2);
+
+        std::ofstream output_file_obj_func_quotient2(output_folder + "obj_func/" + "obj_func_quotient2.txt");
+        std::ostream_iterator<double> output_obj_func_quotient2(output_file_obj_func_quotient2, "\n");
+        std::copy(std::begin(hist_obj_func_quotient2), std::end(hist_obj_func_quotient2), output_obj_func_quotient2);
+
+
+        std::ofstream output_file_energy_descrease_by_ls(output_folder + "obj_func/" + "energy_descrease_by_ls.txt");
+        std::ostream_iterator<double> output_energy_descrease_by_ls(output_file_energy_descrease_by_ls, "\n");
+        std::copy(std::begin(hist_energy_descrease_by_ls), std::end(hist_energy_descrease_by_ls), output_energy_descrease_by_ls);
+
+        
 
         std::ofstream output_file_iter(output_folder + "iter/" + output_tag + ".txt");
         output_file_iter << (hist.size()-1) << std::endl;
@@ -3325,31 +3372,39 @@ int vpn_reg_projected_newton(int argc, char** argv)
             .add(arr_deformation_magnitude)
             .add(arr_rotate_ratio)
             .add(arr_diff_mode_str)
-            .add(arr_g_pos_mode) //new
-            .add(arr_g_neg_mode)
-            .add(arr_g_j_mode) 
-            .add(arr_g_update_gamma_mode)
-            .add(arr_g_eta_mode) 
-            .add(arr_g_kappa_mode)
+            // .add(arr_g_pos_mode) //new
+            // .add(arr_g_neg_mode)
+            // .add(arr_g_j_mode) 
+            // .add(arr_g_update_gamma_mode)
+            // .add(arr_g_eta_mode) 
+            // .add(arr_g_kappa_mode)
             .add(arr_g_grad_mode) 
             .add(arr_iter) 
-            .add(hist_gamma) //new end
-            .add(hist) //vector energy
+            .add(hist_gamma) // vector, n + 1
+            .add(hist) // energy, n + 1
+            .add(hist_reg_element_ratio) //new
+            .add(hist_obj_func_H_norm)
+            .add(hist_obj_func_energy)
+            .add(hist_obj_func_H_norm_ratio)
+            .add(hist_obj_func_energy_ratio)
+            .add(hist_obj_func_total) 
+            .add(hist_obj_func_quotient) 
+            .add(hist_energy_descrease_by_ls) // new end
+            // .add(hist_energy_injection_ratio1)
+            // .add(hist_energy_injection_ratio2)
             .add(hist_line_search_iter)
             .add(hist_line_search_alpha)
             .add(hist_trust_region_ratio)
             .add(hist_trust_region_eps)
-            .add(hist_reg_element_ratio) //new
-            .add(hist_obj_func_f_norm)
-            .add(hist_obj_func_energy)
-            .add(hist_obj_func_f_norm_ratio)
-            .add(hist_obj_func_energy_ratio)
-            .add(hist_obj_func_total) // new end
-            .add(hist_energy_injection_ratio1)
-            .add(hist_energy_injection_ratio2)
+            .add(hist_obj_func_total2) 
+            .add(hist_obj_func_quotient2)
             .writeToFile(results_file_csv, true);  // true表示换行
       
-
+      // TINYAD_DEBUG_OUT("arr_iter:"<<arr_iter.size()<<","<< hist_gamma.size()<<","<< hist.size());
+      // TINYAD_DEBUG_OUT("hist_reg_element_ratio:"<<hist_reg_element_ratio.size()<<","<< hist_obj_func_H_norm.size()<<","<< hist_obj_func_energy.size());
+      // TINYAD_DEBUG_OUT("hist_obj_func_H_norm_ratio"<<hist_obj_func_H_norm_ratio.size()<<","<< hist_obj_func_energy_ratio.size()<<","<< hist_obj_func_total.size());
+      // TINYAD_DEBUG_OUT("hist_obj_func_quotient:"<<hist_obj_func_quotient.size()<<","<< hist_energy_descrease_by_ls.size()<<","<< hist_line_search_iter.size());
+      // TINYAD_DEBUG_OUT("hist_line_search_alpha:"<<hist_line_search_alpha.size()<<","<< hist_trust_region_ratio.size()<<","<< hist_trust_region_eps.size());
       TINYAD_DEBUG_OUT("======== The End ========");
       // comment this out later
       // close the viewer
