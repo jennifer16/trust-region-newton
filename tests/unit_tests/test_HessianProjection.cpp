@@ -27,6 +27,7 @@ int g_pos_mode = 1;
 int g_neg_mode = 1;
 int g_update_gamma_mode = 1;
 double g_MU = 1.0;
+double g_avg_energy = 1.0;
 double g_LAMBDA = 1.0;
 
 
@@ -44,7 +45,8 @@ protected:
         original_g_update_gamma_mode = g_update_gamma_mode;
         original_g_MU = TinyAD::g_MU;
         original_g_LAMBDA = TinyAD::g_LAMBDA;
-        
+        original_g_avg_energy = g_avg_energy;
+
         // 设置测试默认值
         g_j_mode = 1;
         g_kappa_mode = 1;
@@ -53,6 +55,7 @@ protected:
         g_pos_mode = 1;
         g_neg_mode = 1;
         g_update_gamma_mode = 1;
+        g_avg_energy = 1.0;
         TinyAD::g_MU = 1.0;
         TinyAD::g_LAMBDA = 1.0;
     }
@@ -66,7 +69,7 @@ protected:
         g_pos_mode = original_g_pos_mode;
         g_neg_mode = original_g_neg_mode;
         g_update_gamma_mode = original_g_update_gamma_mode;
-        TinyAD::g_MU = original_g_MU;
+        g_avg_energy = original_g_avg_energy;
         TinyAD::g_LAMBDA = original_g_LAMBDA;
     }
     
@@ -80,6 +83,7 @@ private:
     int original_g_update_gamma_mode;
     double original_g_MU;
     double original_g_LAMBDA;
+    double original_g_avg_energy;
 };
 
 // ==================== clamp01 测试 ====================
@@ -481,6 +485,7 @@ TEST_F(HessianProjectionTest, ComputeAlphaGradKappa_Mode3) {
 // ==================== computeAlpha_grad 测试 ====================
 TEST_F(HessianProjectionTest, ComputeAlphaGrad_Basic) {
     g_grad_mode = 1;
+    g_avg_energy = 1.0;
     double alpha_grad_pos = 0, alpha_grad_neg = 0;
     int k = 2;
     Eigen::VectorXd proj_g(2);

@@ -958,6 +958,11 @@ void updateGamma(double &gamma, double _J)
             gamma *= coeff;
             break;
         }
+        case 3:// 覆盖模式
+        {
+            gamma =  TinyAD::g_MU/(std::pow(std::abs(_J), 1.0/3.0)+ TinyAD::EPS_1E_8);
+            break;
+        }
         default: // 保持 gamma 不变
         {
             break;
@@ -1295,7 +1300,9 @@ Eigen::VectorXd computeGradientProjection_vpn(
     return g_rot;
 }
 
-void computeAlpha_grad_eta( double& eta_pos, double& eta_neg, double Kappa = 1)
+void computeAlpha_grad_eta( double& eta_pos, double& eta_neg, double Kappa = 1, 
+    double pos_lambda_ratio = 0.0, double neg_lambda_ratio = 0.0, 
+    double pos_grad_ratio = 0.0, double neg_grad_ratio = 0.0)
 {
 
     int method = g_eta_mode;
@@ -1314,6 +1321,42 @@ void computeAlpha_grad_eta( double& eta_pos, double& eta_neg, double Kappa = 1)
             eta_neg = 0.2;
             break;
         }
+        case 3: // lambda_ratio（忽略 Kappa）
+        {
+            eta_pos = pos_lambda_ratio;
+            eta_neg = neg_lambda_ratio;
+            break;
+        }
+        case 4: // lambda_grad_ratio（忽略 Kappa）
+        {
+            eta_pos = pos_grad_ratio;
+            eta_neg = neg_grad_ratio;
+            break;
+        }
+        case 5: // 固定值模式（忽略 Kappa）
+        {
+            eta_pos = 1.0;
+            eta_neg = 1.0;
+            break;
+        }
+        case 6: // lambda_ratio（忽略 Kappa）
+        {
+            eta_pos = pos_lambda_ratio+neg_lambda_ratio;
+            eta_neg = eta_pos;
+            break;
+        }
+        case 7: // lambda_grad_ratio（忽略 Kappa）
+        {
+            eta_pos = pos_grad_ratio + neg_grad_ratio;
+            eta_neg = eta_pos;
+            break;
+        }
+        case 8: // kappa
+        {
+            eta_pos = Kappa;
+            eta_neg = Kappa;
+            break;
+        }
         default: // 保守的对称模式
         {
             eta_pos = 0.5;
@@ -1321,9 +1364,12 @@ void computeAlpha_grad_eta( double& eta_pos, double& eta_neg, double Kappa = 1)
             break;
         }
     }
-    #if DEBUG_OUTPUT
-        TINYAD_DEBUG_OUT("eta_pos,eta_neg :"<<eta_pos<<","<<eta_neg ); 
-    #endif
+    if (eta_pos >1.0 || eta_neg > 1.0) {
+        TINYAD_ERROR("eta_pos,eta_neg :"<<eta_pos<<","<<eta_neg ); 
+    }
+    
+    eta_pos = std::max(0.0, std::min(1.0, eta_pos));
+    eta_neg = std::max(0.0, std::min(1.0, eta_neg));
 }
 
 double computeAlpha_grad_kappa(const Eigen::VectorXd& eigenvalues,const double m_eps = TinyAD::EPS_1E_8, const double alpha_J = 1.0)
@@ -1381,31 +1427,30 @@ void computeAlpha_grad( double& alpha_grad_pos, double& alpha_grad_neg,
     double S_g_neg = 0.0, S_lambda_neg = 0.0;
     double S_g_total = 0.0, S_lambda_total = 0.0;
     for (size_t i = 0; i < k; ++i) {
+        double g_i_sq = proj_g[i]*proj_g[i];
+        double abs_lambda_i = eigenvalues[i];  // |λ_i|
+
         if (eigenvalues[i] < 0) {
-            double abs_lambda_i = -eigenvalues[i];  // |λ_i|
+            abs_lambda_i = -eigenvalues[i];  // |λ_i|
+
             if (proj_g[i] > 0) //同向
             {
                 S_lambda_pos += abs_lambda_i * abs_lambda_i; // |λ_i|²
 
-                double g_i_sq = proj_g[i]*proj_g[i];                // g_i² (来自 computeGradientProjection)
+                // double g_i_sq = proj_g[i]*proj_g[i];                // g_i² (来自 computeGradientProjection)
                 S_g_pos += g_i_sq / (abs_lambda_i + m_eps);
             }
             else //异向
             {
                 S_lambda_neg += abs_lambda_i * abs_lambda_i; // |λ_i|²
 
-                double g_i_sq = proj_g[i]*proj_g[i];                // g_i² (来自 computeGradientProjection)
+                // double g_i_sq = proj_g[i]*proj_g[i];                // g_i² (来自 computeGradientProjection)
                 S_g_neg += g_i_sq / (abs_lambda_i + m_eps);
-            }    
+            } 
+            // S_g_total += g_i_sq / (abs_lambda_i + m_eps);   
         }
-        else
-        {
-            double abs_lambda_i = eigenvalues[i];  // |λ_i|
-            S_lambda_total += abs_lambda_i * abs_lambda_i; // |λ_i|²
-
-            double g_i_sq = proj_g[i]*proj_g[i];                // g_i² (来自 computeGradientProjection)
-            S_g_total += g_i_sq / (abs_lambda_i + m_eps);
-        }
+        S_g_total += g_i_sq / (abs_lambda_i + m_eps);
+        S_lambda_total += abs_lambda_i * abs_lambda_i; // |λ_i|²
     }
 
     double Kappa = computeAlpha_grad_kappa(eigenvalues, m_eps, alpha_J); 
@@ -1416,6 +1461,10 @@ void computeAlpha_grad( double& alpha_grad_pos, double& alpha_grad_neg,
     double energy_e = _f;
     double eta_pos = 1.0;
     double eta_neg = 1.0;
+    double pos_lambda_ratio = S_lambda_pos / (S_lambda_total + m_eps);
+    double neg_lambda_ratio = S_lambda_neg / (S_lambda_total + m_eps);
+    double pos_grad_ratio = S_g_pos / (S_g_total + m_eps);
+    double neg_grad_ratio = S_g_neg / (S_g_total + m_eps);
 
     // energy_e = get_energy();
     switch(method)
@@ -1441,7 +1490,8 @@ void computeAlpha_grad( double& alpha_grad_pos, double& alpha_grad_neg,
             // get energy
             energy_e = S_g_total; // tbd zj: 也可以考虑加权，或者只考虑S_g_pos
 
-            computeAlpha_grad_eta(eta_pos, eta_neg, Kappa);
+            computeAlpha_grad_eta(eta_pos, eta_neg, Kappa,
+                pos_lambda_ratio, neg_lambda_ratio, pos_grad_ratio, neg_grad_ratio);
 
             // 3. 计算alpha_grad_pos
             // double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
@@ -1467,7 +1517,8 @@ void computeAlpha_grad( double& alpha_grad_pos, double& alpha_grad_neg,
             // get energy
             energy_e = S_g_total; // tbd zj: 也可以考虑加权，或者只考虑S_g_pos
 
-            computeAlpha_grad_eta(eta_pos, eta_neg , Kappa);
+            computeAlpha_grad_eta(eta_pos, eta_neg , Kappa, 
+                pos_lambda_ratio, neg_lambda_ratio, pos_grad_ratio, neg_grad_ratio);
 
             // 3. 计算alpha_grad_pos
             // double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
@@ -1522,7 +1573,8 @@ void computeAlpha_grad( double& alpha_grad_pos, double& alpha_grad_neg,
             // get energy
             // energy_e = S_g_total; // tbd zj: 也可以考虑加权，或者只考虑S_g_pos
 
-            computeAlpha_grad_eta(eta_pos, eta_neg, Kappa);
+            computeAlpha_grad_eta(eta_pos, eta_neg, Kappa,
+                pos_lambda_ratio, neg_lambda_ratio, pos_grad_ratio, neg_grad_ratio);
 
             // 3. 计算alpha_grad_pos
             // double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
@@ -1548,7 +1600,8 @@ void computeAlpha_grad( double& alpha_grad_pos, double& alpha_grad_neg,
             // get energy
             // energy_e = S_g_total; // tbd zj: 也可以考虑加权，或者只考虑S_g_pos
 
-            computeAlpha_grad_eta(eta_pos, eta_neg , Kappa);
+            computeAlpha_grad_eta(eta_pos, eta_neg, Kappa,
+                pos_lambda_ratio, neg_lambda_ratio, pos_grad_ratio, neg_grad_ratio);
 
             // 3. 计算alpha_grad_pos
             // double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
@@ -1587,7 +1640,8 @@ void computeAlpha_grad( double& alpha_grad_pos, double& alpha_grad_neg,
             // get energy
             energy_e = TinyAD::g_avg_vol_energy * std::abs(volume); // tbd zj: 也可以考虑加权，或者只考虑S_g_pos
 
-            computeAlpha_grad_eta(eta_pos, eta_neg, Kappa);
+            computeAlpha_grad_eta(eta_pos, eta_neg, Kappa,
+                pos_lambda_ratio, neg_lambda_ratio, pos_grad_ratio, neg_grad_ratio);
 
             // 3. 计算alpha_grad_pos
             // double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
@@ -1613,7 +1667,8 @@ void computeAlpha_grad( double& alpha_grad_pos, double& alpha_grad_neg,
             // get energy
             energy_e = TinyAD::g_avg_vol_energy * std::abs(volume);
 
-            computeAlpha_grad_eta(eta_pos, eta_neg , Kappa);
+            computeAlpha_grad_eta(eta_pos, eta_neg, Kappa,
+                pos_lambda_ratio, neg_lambda_ratio, pos_grad_ratio, neg_grad_ratio);
 
             // 3. 计算alpha_grad_pos
             // double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
@@ -1646,7 +1701,260 @@ void computeAlpha_grad( double& alpha_grad_pos, double& alpha_grad_neg,
             alpha_grad_neg = std::min(1.0, alpha_grad_neg_min);
             
             break;
+        }   
+        case 9: // same to 4, 不区分safe&unsafe,  lower threshold based on total energy
+        {
+            // 3. 计算alpha_grad_pos
+            // double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
+            double S_g_total_neg = S_g_pos + S_g_neg; //与上面的total不同，不包含正特征值
+            double S_lambda_total_neg = S_lambda_pos + S_lambda_neg; //与上面的total不同，不包含正特征值
+            double ratio_pos = S_g_total_neg / (2.0 * gamma * S_lambda_total_neg + m_eps);
+            // 基于解析公式的混合策略：α = (S_g / (2γS_λ))^(1/3)，其中γ是一个超参数，需标定。
+            // 这个公式来源于变分问题的解析解，能够根据S_g和S_λ的关系自动调整混合系数，实现更智能的特征值增强。
+            // S_g越大（负特征值贡献越大,能量下降越大），S_λ越小（负特征值越小，修正代价较小），则α越大，增强效果越强。
+            alpha_grad_pos = std::pow(ratio_pos, 1.0 / 3.0);
+            // alpha_grad_pos = std::max(0.0, std::min(1.0, alpha_grad_pos));
+            alpha_grad_neg = alpha_grad_pos;
+
+            // get energy
+            energy_e = S_g_total; // tbd zj: 也可以考虑加权，或者只考虑S_g_pos
+            double alpha_grad_min = S_g_total_neg / (eta_pos * energy_e + m_eps);
+
+            alpha_grad_pos = std::min(std::max(alpha_grad_pos, alpha_grad_min), 1.0);
+            alpha_grad_neg = alpha_grad_pos;
+
+            break;
+            
+        }  
+        case 10: // same to 9,different element energy
+        {
+            // 3. 计算alpha_grad_pos
+            // double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
+            double S_g_total_neg = S_g_pos + S_g_neg; //与上面的total不同，不包含正特征值
+            double S_lambda_total_neg = S_lambda_pos + S_lambda_neg; //与上面的total不同，不包含正特征值
+            double ratio_pos = S_g_total_neg / (2.0 * gamma * S_lambda_total_neg + m_eps);
+            // 基于解析公式的混合策略：α = (S_g / (2γS_λ))^(1/3)，其中γ是一个超参数，需标定。
+            // 这个公式来源于变分问题的解析解，能够根据S_g和S_λ的关系自动调整混合系数，实现更智能的特征值增强。
+            // S_g越大（负特征值贡献越大,能量下降越大），S_λ越小（负特征值越小，修正代价较小），则α越大，增强效果越强。
+            alpha_grad_pos = std::pow(ratio_pos, 1.0 / 3.0);
+            // alpha_grad_pos = std::max(0.0, std::min(1.0, alpha_grad_pos));
+            alpha_grad_neg = alpha_grad_pos;
+
+            // get energy
+            energy_e = std::max(S_g_total, energy_e); // tbd zj: 也可以考虑加权，或者只考虑S_g_pos
+            double alpha_grad_min = S_g_total_neg / (0.5 * energy_e + m_eps);
+
+            alpha_grad_pos = std::min(1.0, alpha_grad_min);
+            alpha_grad_neg = alpha_grad_pos;
+            break;
+            
+        } 
+        case 11: // no safe&unsafe,  alpha_min, energy = max E
+        {
+            // 3. 计算alpha_grad_pos
+            // double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
+            double S_g_total_neg = S_g_pos + S_g_neg; //与上面的total不同，不包含正特征值
+            double S_lambda_total_neg = S_lambda_pos + S_lambda_neg; //与上面的total不同，不包含正特征值
+            // double ratio_pos = S_g_total_neg / (2.0 * gamma * S_lambda_total_neg + m_eps);
+            // // 基于解析公式的混合策略：α = (S_g / (2γS_λ))^(1/3)，其中γ是一个超参数，需标定。
+            // // 这个公式来源于变分问题的解析解，能够根据S_g和S_λ的关系自动调整混合系数，实现更智能的特征值增强。
+            // // S_g越大（负特征值贡献越大,能量下降越大），S_λ越小（负特征值越小，修正代价较小），则α越大，增强效果越强。
+            // alpha_grad_pos = std::pow(ratio_pos, 1.0 / 3.0);
+            // // alpha_grad_pos = std::max(0.0, std::min(1.0, alpha_grad_pos));
+            // alpha_grad_neg = alpha_grad_pos;
+
+            // get energy
+            double P = S_g_total_neg;
+            computeAlpha_grad_eta(eta_pos, eta_neg , Kappa, 
+                pos_lambda_ratio, neg_lambda_ratio, pos_grad_ratio, neg_grad_ratio);
+            energy_e = std::max(S_g_total, energy_e); // tbd zj: 也可以考虑加权，或者只考虑S_g_pos
+            eta_pos = 1;
+            double eta_energy = 2 * eta_pos * energy_e;
+            double alpha_grad_min = (P + std::sqrt(P * (P + eta_energy))) / (eta_energy + m_eps);
+
+            alpha_grad_min = std::min(1.0, std::max(0.0, alpha_grad_min));
+            alpha_grad_pos = alpha_grad_min;
+            alpha_grad_neg = alpha_grad_min;
+            break;
+            
         }
+        case 12: // no safe&unsafe,  alpha_min, energy = element_e
+        {
+            // 3. 计算alpha_grad_pos
+            // double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
+            double S_g_total_neg = S_g_pos + S_g_neg; //与上面的total不同，不包含正特征值
+            double S_lambda_total_neg = S_lambda_pos + S_lambda_neg; //与上面的total不同，不包含正特征值
+            // double ratio_pos = S_g_total_neg / (2.0 * gamma * S_lambda_total_neg + m_eps);
+            // // 基于解析公式的混合策略：α = (S_g / (2γS_λ))^(1/3)，其中γ是一个超参数，需标定。
+            // // 这个公式来源于变分问题的解析解，能够根据S_g和S_λ的关系自动调整混合系数，实现更智能的特征值增强。
+            // // S_g越大（负特征值贡献越大,能量下降越大），S_λ越小（负特征值越小，修正代价较小），则α越大，增强效果越强。
+            // alpha_grad_pos = std::pow(ratio_pos, 1.0 / 3.0);
+            // // alpha_grad_pos = std::max(0.0, std::min(1.0, alpha_grad_pos));
+            // alpha_grad_neg = alpha_grad_pos;
+
+            // get energy
+            double P = S_g_total_neg;
+            computeAlpha_grad_eta(eta_pos, eta_neg , Kappa, 
+                pos_lambda_ratio, neg_lambda_ratio, pos_grad_ratio, neg_grad_ratio);
+            // energy_e = std::max(S_g_total, energy_e); // tbd zj: 也可以考虑加权，或者只考虑S_g_pos
+            // eta_pos = 1;
+            double eta_energy = 2 * eta_pos * energy_e;
+            double alpha_grad_min = (P + std::sqrt(P * (P + eta_energy))) / (eta_energy + m_eps);
+
+            alpha_grad_min = std::min(1.0, std::max(0.0, alpha_grad_min));
+            alpha_grad_pos = alpha_grad_min;
+            alpha_grad_neg = alpha_grad_min;
+            break;
+            
+        } 
+        case 13: // no safe&unsafe,  alpha_min,energy-avg
+        {
+            // 3. 计算alpha_grad_pos
+            // double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
+            double S_g_total_neg = S_g_pos + S_g_neg; //与上面的total不同，不包含正特征值
+            double S_lambda_total_neg = S_lambda_pos + S_lambda_neg; //与上面的total不同，不包含正特征值
+            // double ratio_pos = S_g_total_neg / (2.0 * gamma * S_lambda_total_neg + m_eps);
+            // // 基于解析公式的混合策略：α = (S_g / (2γS_λ))^(1/3)，其中γ是一个超参数，需标定。
+            // // 这个公式来源于变分问题的解析解，能够根据S_g和S_λ的关系自动调整混合系数，实现更智能的特征值增强。
+            // // S_g越大（负特征值贡献越大,能量下降越大），S_λ越小（负特征值越小，修正代价较小），则α越大，增强效果越强。
+            // alpha_grad_pos = std::pow(ratio_pos, 1.0 / 3.0);
+            // // alpha_grad_pos = std::max(0.0, std::min(1.0, alpha_grad_pos));
+            // alpha_grad_neg = alpha_grad_pos;
+
+            // get energy
+            double P = S_g_total_neg;
+            computeAlpha_grad_eta(eta_pos, eta_neg , Kappa, 
+                pos_lambda_ratio, neg_lambda_ratio, pos_grad_ratio, neg_grad_ratio);
+
+            energy_e = S_g_total; // tbd zj: 也可以考虑加权，或者只考虑S_g_pos
+            eta_pos = 1;
+            double eta_energy = 2 * eta_pos * energy_e;
+            double alpha_grad_min = (P + std::sqrt(P * (P + eta_energy))) / (eta_energy + m_eps);
+
+            alpha_grad_min = std::min(1.0, std::max(0.0, alpha_grad_min));
+            alpha_grad_pos = alpha_grad_min;
+            alpha_grad_neg = alpha_grad_min;
+            break;
+            
+        }
+        case 14: // no safe&unsafe,  alpha_min, energy = max E
+        {
+            // 3. 计算alpha_grad_pos
+            // double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
+            double S_g_total_neg = S_g_pos + S_g_neg; //与上面的total不同，不包含正特征值
+            double S_lambda_total_neg = S_lambda_pos + S_lambda_neg; //与上面的total不同，不包含正特征值
+            // double ratio_pos = S_g_total_neg / (2.0 * gamma * S_lambda_total_neg + m_eps);
+            // // 基于解析公式的混合策略：α = (S_g / (2γS_λ))^(1/3)，其中γ是一个超参数，需标定。
+            // // 这个公式来源于变分问题的解析解，能够根据S_g和S_λ的关系自动调整混合系数，实现更智能的特征值增强。
+            // // S_g越大（负特征值贡献越大,能量下降越大），S_λ越小（负特征值越小，修正代价较小），则α越大，增强效果越强。
+            // alpha_grad_pos = std::pow(ratio_pos, 1.0 / 3.0);
+            // // alpha_grad_pos = std::max(0.0, std::min(1.0, alpha_grad_pos));
+            // alpha_grad_neg = alpha_grad_pos;
+
+            // get energy
+            double P = S_g_total_neg;
+            computeAlpha_grad_eta(eta_pos, eta_neg , Kappa, 
+                pos_lambda_ratio, neg_lambda_ratio, pos_grad_ratio, neg_grad_ratio);
+            energy_e = std::max(g_avg_energy, energy_e); // tbd zj: 也可以考虑加权，或者只考虑S_g_pos
+            // eta_pos = 1;
+            double eta_energy = 2 * eta_pos * energy_e;
+            double alpha_grad_min = (P + std::sqrt(P * (P + eta_energy))) / (eta_energy + m_eps);
+
+            alpha_grad_min = std::min(1.0, std::max(0.0, alpha_grad_min));
+            alpha_grad_pos = alpha_grad_min;
+            alpha_grad_neg = alpha_grad_min;
+            break;
+            
+        }
+        case 15: // no safe&unsafe,  alpha_min,energy-avg
+        {
+            // 3. 计算alpha_grad_pos
+            // double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
+            double S_g_total_neg = S_g_pos + S_g_neg; //与上面的total不同，不包含正特征值
+            double S_lambda_total_neg = S_lambda_pos + S_lambda_neg; //与上面的total不同，不包含正特征值
+            // double ratio_pos = S_g_total_neg / (2.0 * gamma * S_lambda_total_neg + m_eps);
+            // // 基于解析公式的混合策略：α = (S_g / (2γS_λ))^(1/3)，其中γ是一个超参数，需标定。
+            // // 这个公式来源于变分问题的解析解，能够根据S_g和S_λ的关系自动调整混合系数，实现更智能的特征值增强。
+            // // S_g越大（负特征值贡献越大,能量下降越大），S_λ越小（负特征值越小，修正代价较小），则α越大，增强效果越强。
+            // alpha_grad_pos = std::pow(ratio_pos, 1.0 / 3.0);
+            // // alpha_grad_pos = std::max(0.0, std::min(1.0, alpha_grad_pos));
+            // alpha_grad_neg = alpha_grad_pos;
+
+            // get energy
+            double P = S_g_total_neg;
+            computeAlpha_grad_eta(eta_pos, eta_neg , Kappa, 
+                pos_lambda_ratio, neg_lambda_ratio, pos_grad_ratio, neg_grad_ratio);
+
+            energy_e = g_avg_energy; // tbd zj: 也可以考虑加权，或者只考虑S_g_pos
+            // eta_pos = 1;
+            double eta_energy = 2 * eta_pos * energy_e;
+            double alpha_grad_min = (P + std::sqrt(P * (P + eta_energy))) / (eta_energy + m_eps);
+
+            alpha_grad_min = std::min(1.0, std::max(0.0, alpha_grad_min));
+            alpha_grad_pos = alpha_grad_min;
+            alpha_grad_neg = alpha_grad_min;
+            break;
+            
+        } 
+        case 16: // no safe&unsafe,  [alpha_min, 1], energy = element_e
+        {
+            // 3. 计算alpha_grad_pos
+            // double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
+            double S_g_total_neg = S_g_pos + S_g_neg; //与上面的total不同，不包含正特征值
+            double S_lambda_total_neg = S_lambda_pos + S_lambda_neg; //与上面的total不同，不包含正特征值
+            double ratio = ( gamma * S_lambda_total_neg) / (2.0 * S_g_total_neg + m_eps);
+            // // 基于解析公式的混合策略：α = (S_g / (2γS_λ))^(1/3)，其中γ是一个超参数，需标定。
+            // // 这个公式来源于变分问题的解析解，能够根据S_g和S_λ的关系自动调整混合系数，实现更智能的特征值增强。
+            // // S_g越大（负特征值贡献越大,能量下降越大），S_λ越小（负特征值越小，修正代价较小），则α越大，增强效果越强。
+            alpha_grad_pos = std::pow(ratio, 1.0 / 3.0);
+            // // alpha_grad_pos = std::max(0.0, std::min(1.0, alpha_grad_pos));
+            // alpha_grad_neg = alpha_grad_pos;
+
+            // get energy
+            double P = S_g_total_neg;
+            computeAlpha_grad_eta(eta_pos, eta_neg , Kappa, 
+                pos_lambda_ratio, neg_lambda_ratio, pos_grad_ratio, neg_grad_ratio);
+            // energy_e = std::max(S_g_total, energy_e); // tbd zj: 也可以考虑加权，或者只考虑S_g_pos
+            // eta_pos = 1;
+            double eta_energy = 2 * eta_pos * energy_e;
+            double alpha_grad_min = (P + std::sqrt(P * (P + eta_energy))) / (eta_energy + m_eps);
+
+            alpha_grad_min = std::min(1.0, std::max(0.0, alpha_grad_min));
+            alpha_grad_pos = std::max(alpha_grad_pos, alpha_grad_min); // [alpha_min, 1]
+            alpha_grad_neg = alpha_grad_min;
+            break;
+            
+        }
+        case 17: // no safe&unsafe,  [alpha_min, 1], energy = element_e
+        {
+            // 3. 计算alpha_grad_pos
+            // double gamma = g_para_gamma ;  // 超参数 γ，需标定,或者自适应 global tbd zj
+            double S_g_total_neg = S_g_pos + S_g_neg; //与上面的total不同，不包含正特征值
+            double S_lambda_total_neg = S_lambda_pos + S_lambda_neg; //与上面的total不同，不包含正特征值
+            double ratio = ( gamma * S_lambda_total_neg) / (2.0 * S_g_total_neg + m_eps);
+            // // 基于解析公式的混合策略：α = (S_g / (2γS_λ))^(1/3)，其中γ是一个超参数，需标定。
+            // // 这个公式来源于变分问题的解析解，能够根据S_g和S_λ的关系自动调整混合系数，实现更智能的特征值增强。
+            // // S_g越大（负特征值贡献越大,能量下降越大），S_λ越小（负特征值越小，修正代价较小），则α越大，增强效果越强。
+            alpha_grad_pos = std::pow(ratio, 1.0 / 3.0);
+            // // alpha_grad_pos = std::max(0.0, std::min(1.0, alpha_grad_pos));
+            // alpha_grad_neg = alpha_grad_pos;
+
+            // get energy
+            double P = S_g_total_neg;
+            computeAlpha_grad_eta(eta_pos, eta_neg , Kappa, 
+                pos_lambda_ratio, neg_lambda_ratio, pos_grad_ratio, neg_grad_ratio);
+            energy_e = std::max(g_avg_energy, energy_e); // tbd zj: 也可以考虑加权，或者只考虑S_g_pos
+            // eta_pos = 1;
+            double eta_energy = 2 * eta_pos * energy_e;
+            double alpha_grad_min = (P + std::sqrt(P * (P + eta_energy))) / (eta_energy + m_eps);
+
+            alpha_grad_min = std::min(1.0, std::max(0.0, alpha_grad_min));
+            alpha_grad_pos = std::max(alpha_grad_pos, alpha_grad_min); // [alpha_min, 1]
+            alpha_grad_neg = alpha_grad_min;
+            break;
+            
+        }
+        
         default: // safe direction 1/3次方的方案 + unsafe direction 1/2次方的方案
         {
             // 3. 计算alpha_grad_pos

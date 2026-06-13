@@ -43,6 +43,11 @@
   #define DEBUG_OUTPUT 0
 #endif
 
+#ifndef DEBUG_OUTPUT_VPN
+  #define DEBUG_OUTPUT_VPN 1
+#endif
+
+
 #ifndef DEBUG_OUTPUT_BLEND_TR
   #define DEBUG_OUTPUT_BLEND_TR 0
 #endif
@@ -103,6 +108,7 @@ int g_update_gamma_mode;
 int g_eta_mode;
 int g_kappa_mode;
 int g_grad_mode;
+double g_avg_energy;
 
 // void stop_recording(int frame_count_, const std::string& output_dir_) {
     
@@ -2407,40 +2413,67 @@ double compute_mesh_volume( Eigen::MatrixXd& V,  Eigen::MatrixXi& F)
     return volume;
 }
 
-void update_global_gamma(int n_v, const double energy, 
+void update_global_gamma(int n_v,int n_e, const double energy, 
   const Eigen::VectorXd& g, const Eigen::MatrixXd& H_proj,
   double prev_ratio, double tr_threshold, int mode)
 {
   double t_eps = 1e-10;
   double g_norm_o = g.norm();
-  double g_norm = g.norm()/n_v; // average gradient norm per variable, to make it less sensitive to problem size
+  double g_norm_v = g.norm()/n_v; // average gradient norm per variable, to make it less sensitive to problem size
+  double g_norm_e = g.norm()/n_e; // average gradient norm per element, to make it less sensitive to problem size
   double H_proj_norm_o = H_proj.norm(); // average Hessian norm per variable, to make it less sensitive to problem size
-  double H_proj_norm = H_proj.norm()/n_v; // average Hessian norm per variable, to make it less sensitive to problem size
+  double H_proj_norm_v = H_proj.norm()/n_v; // average Hessian norm per variable, to make it less sensitive to problem size
+  double H_proj_norm_e = H_proj.norm()/n_e; // average Hessian norm per element, to make it less sensitive to problem size
   switch(mode)
   {
     case 0:
     {
-      g_para_gamma = H_proj_norm/(g_norm + t_eps); // 可以根据tr_ratio调整gamma
+      g_para_gamma = H_proj_norm_v/(g_norm_v + t_eps); // 可以根据tr_ratio调整gamma
       break;
     }
     case -1:
     {
-      g_para_gamma = (g_norm*g_norm)/(H_proj_norm * H_proj_norm * H_proj_norm + t_eps); // 可以根据tr_ratio调整gamma
+      g_para_gamma = (g_norm_v*g_norm_v)/(H_proj_norm_v * H_proj_norm_v * H_proj_norm_v + t_eps); // 可以根据tr_ratio调整gamma
       break;
     }
     case -2:
     {
-      g_para_gamma = std::abs(energy/n_v)/(H_proj_norm * H_proj_norm  + t_eps); // 可以根据tr_ratio调整gamma 
+      g_para_gamma = std::abs(energy/n_v)/(H_proj_norm_v * H_proj_norm_v  + t_eps); // 可以根据tr_ratio调整gamma 
+      break;
+    }
+    case -24:
+    {
+      g_para_gamma = std::abs(energy/n_e)/(H_proj_norm_e * H_proj_norm_e  + t_eps); // 可以根据tr_ratio调整gamma 
+      break;
+    }
+    case -25:
+    {
+      g_para_gamma = std::abs(energy/n_e)/(H_proj_norm_e * H_proj_norm_e  + t_eps); // 可以根据tr_ratio调整gamma 
+      break;
+    }
+    case -26: //倒数
+    {
+      g_para_gamma = H_proj_norm_v * H_proj_norm_v/( std::abs(energy/n_v) + t_eps);; // 可以根据tr_ratio调整gamma 
+      break;
+    }
+    case -27: //倒数
+    {
+      g_para_gamma = H_proj_norm_e * H_proj_norm_e/( std::abs(energy/n_e) + t_eps); // 可以根据tr_ratio调整gamma 
+      break;
+    }
+    case -28: //倒数
+    {
+      g_para_gamma = H_proj_norm_o * H_proj_norm_o/( std::abs(energy) + t_eps); // 可以根据tr_ratio调整gamma 
       break;
     }
     case -3:
     {
-      g_para_gamma = g_norm/(H_proj_norm + t_eps); // 可以根据tr_ratio调整gamma
+      g_para_gamma = g_norm_v/(H_proj_norm_v + t_eps); // 可以根据tr_ratio调整gamma
       break;
     }
     case -4:
     {
-      double s_gamma = std::abs(energy/n_v)/(H_proj_norm * H_proj_norm  + t_eps); 
+      double s_gamma = std::abs(energy/n_v)/(H_proj_norm_v * H_proj_norm_v  + t_eps); 
       double d_gamma = g_para_gamma;
       if(std::fabs(prev_ratio-1.0) < tr_threshold)// >0.9模型保守，放大gamma >1，趋向clamp
       {
@@ -2452,7 +2485,7 @@ void update_global_gamma(int n_v, const double energy,
     }
     case -5:
     {
-      double s_gamma = std::abs(energy/n_v)/(H_proj_norm   + t_eps); 
+      double s_gamma = std::abs(energy/n_v)/(H_proj_norm_v   + t_eps); 
       double d_gamma = g_para_gamma;
       
       g_para_gamma = std::max(s_gamma, d_gamma); // 可以根据tr_ratio调整gamma 
@@ -2460,7 +2493,7 @@ void update_global_gamma(int n_v, const double energy,
     }
     case -6:
     {
-      double s_gamma = std::abs(energy/n_v)/(H_proj_norm   + t_eps); 
+      double s_gamma = std::abs(energy/n_v)/(H_proj_norm_v   + t_eps); 
       double d_gamma = g_para_gamma;
       
       if(std::fabs(prev_ratio-1.0) < tr_threshold)// >0.9模型保守，放大gamma >1，趋向clamp
@@ -2473,12 +2506,27 @@ void update_global_gamma(int n_v, const double energy,
     }
     case -21:
     {
-      g_para_gamma = std::abs(energy*n_v)/(4*H_proj_norm * H_proj_norm  + t_eps); // 可以根据tr_ratio调整gamma 
+      g_para_gamma = std::abs(energy*n_v)/(4*H_proj_norm_v * H_proj_norm_v  + t_eps); // 可以根据tr_ratio调整gamma 
       break;
     }
     case -11:
     {
-      g_para_gamma = (g_norm*g_norm*n_v)/(4*H_proj_norm * H_proj_norm * H_proj_norm + t_eps); // 可以根据tr_ratio调整gamma 
+      g_para_gamma = (g_norm_v*g_norm_v*n_v)/(4*H_proj_norm_v * H_proj_norm_v * H_proj_norm_v + t_eps); // 可以根据tr_ratio调整gamma 
+      break;
+    }
+    case -111:
+    {
+      g_para_gamma = (4*H_proj_norm_v * H_proj_norm_v * H_proj_norm_v) /( (g_norm_v * g_norm_v * n_v)+ t_eps); // 可以根据tr_ratio调整gamma 
+      break;
+    }
+    case -112:
+    {
+      g_para_gamma = (H_proj_norm_o * H_proj_norm_o * H_proj_norm_o) /( (g_norm_o * g_norm_o)+ t_eps); // 可以根据tr_ratio调整gamma 
+      break;
+    }
+    case -113:
+    {
+      g_para_gamma = (H_proj_norm_e * H_proj_norm_e * H_proj_norm_e) /( (g_norm_e * g_norm_e)+ t_eps); // 可以根据tr_ratio调整gamma 
       break;
     }
     case -13:
@@ -3086,6 +3134,7 @@ int vpn_reg_projected_newton(int argc, char** argv)
         g_reg_element_num = 0;
 
         double current_energy = hist.empty() ? initial_energy : hist.back();
+        g_avg_energy = current_energy/F.rows();
         
         TinyAD::g_avg_vol_energy = current_energy/(volume + 1e-8);
 
@@ -3129,7 +3178,7 @@ int vpn_reg_projected_newton(int argc, char** argv)
         TINYAD_DEBUG_OUT("Energy in iteration " << i << ": " << f);
         if (_diff_mode == TinyAD::HessianProjectionMode::CLAMP_ABS_BLENDING_J)
         {
-          update_global_gamma(V.rows(), current_energy, g, H_proj, prev_ratio,tr_threshold, std::round(para_gamma));
+          update_global_gamma(V.rows(),F.rows(), current_energy, g, H_proj, prev_ratio,tr_threshold, std::round(para_gamma));
         }
 
         H = H_proj;
@@ -3375,8 +3424,8 @@ int vpn_reg_projected_newton(int argc, char** argv)
             // .add(arr_g_pos_mode) //new
             // .add(arr_g_neg_mode)
             // .add(arr_g_j_mode) 
-            // .add(arr_g_update_gamma_mode)
-            // .add(arr_g_eta_mode) 
+            .add(arr_g_update_gamma_mode)
+            .add(arr_g_eta_mode) 
             // .add(arr_g_kappa_mode)
             .add(arr_g_grad_mode) 
             .add(arr_iter) 

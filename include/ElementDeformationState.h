@@ -13,3 +13,4 @@ extern int g_update_gamma_mode;
 extern int g_eta_mode;
 extern int g_kappa_mode;
 extern int g_grad_mode;
+extern double g_avg_energy;
