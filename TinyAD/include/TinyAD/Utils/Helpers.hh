@@ -93,7 +93,7 @@ namespace TinyAD
         AUTO = 0,      // 自动选择
         SOFT_ABS = 1,   // 软 abs
         ABS = 2,       // 直接取绝对值
-        ABS_NONDIFF = 3,       // 直接取绝对值
+        ABS_NONDIFF = 3,       // 直接取绝对值, abs paper 24
 
         CLAMP = 4,     // 直接 clamp 到 epsilon
         SOFT_CLAMP = 5, // 软 clamp
@@ -101,7 +101,7 @@ namespace TinyAD
 
         CLAMP_ABS = 7, // clamp 到 epsilon + abs 负值
         HYBRID = 8,    // 混合策略 
-        CLAMP_ABS_NONDIFF = 9, //  trust region newton
+        CLAMP_ABS_NONDIFF = 9, //  trust region newton paper 24
 
         CLAMP_ABS_ADAPTIVE_NONDIFF = 10, // 自适应选择的非可微版本
 
@@ -116,6 +116,8 @@ namespace TinyAD
         CLAMP_ABS_BLENDING3 = 19,
         CLAMP_ABS_BLENDING5 = 20,
         CLAMP_ABS_BLENDING_J = 21,
+        CLAMP_ABS_BLENDING_Q = 22, //blending paper 25
+        CLAMP_ABS_BLENDING_J_Energy = 23,
     };
 
     // // 构造函数：可以配置不同的行为
@@ -141,6 +143,7 @@ namespace TinyAD
     inline const double EPS_MACHINE = std::numeric_limits<double>::epsilon();  // 约 2.22e-16
     inline const double COND_THRESHOLD = 1e10;
     inline const double ZERO = EPS_1E_8;
+    inline const double EPS = EPS_1E_8;
 
     // 相对容差（考虑数值大小）
     inline bool isZero(double x, double tolerance = ZERO) {

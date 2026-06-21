@@ -105,7 +105,7 @@ TEST_F(HessianProjectionTest, ComputeKappa_Method1_PositiveAndNegative) {
     Eigen::VectorXd eigenvalues(3);
     eigenvalues << -2.0, 1.0, 3.0;
     
-    double kappa = TinyAD::computeKappa(1, eigenvalues, 1e-8);
+    double kappa = TinyAD::computeKappa(1, eigenvalues);
     // λ_max = 3, λ_min = -2
     // nominator = 5, denominator = 5 + |1| + eps ≈ 6
     // kappa ≈ 5/6 ≈ 0.833
@@ -118,7 +118,7 @@ TEST_F(HessianProjectionTest, ComputeKappa_Method1_AllPositive) {
     Eigen::VectorXd eigenvalues(3);
     eigenvalues << 1.0, 2.0, 3.0;
     
-    double kappa = TinyAD::computeKappa(1, eigenvalues, 1e-8);
+    double kappa = TinyAD::computeKappa(1, eigenvalues);
     // λ_max = 3, λ_min = 1, 同号分支
     // nominator = 2, denominator = |3|+|1|+eps ≈ 4
     // kappa = 0.5
@@ -129,7 +129,7 @@ TEST_F(HessianProjectionTest, ComputeKappa_Method2_AllPositive) {
     Eigen::VectorXd eigenvalues(3);
     eigenvalues << 1.0, 2.0, 3.0;
     
-    double kappa = TinyAD::computeKappa(2, eigenvalues, 1e-8);
+    double kappa = TinyAD::computeKappa(2, eigenvalues);
     // 全正特征值，lambda_min > 0，应返回 0.0
     EXPECT_DOUBLE_EQ(kappa, 0.0);
 }
@@ -138,7 +138,7 @@ TEST_F(HessianProjectionTest, ComputeKappa_Method2_MixedSign) {
     Eigen::VectorXd eigenvalues(3);
     eigenvalues << -2.0, 1.0, 3.0;
     
-    double kappa = TinyAD::computeKappa(2, eigenvalues, 1e-8);
+    double kappa = TinyAD::computeKappa(2, eigenvalues);
     // sum_abs_all = 2+1+3=6, sum_abs_neg=2, neg_ratio=1/3≈0.333
     // kappa = 1 - exp(-4*0.333) ≈ 1 - 0.264 = 0.736
     EXPECT_NEAR(kappa, 0.736, 1e-3);
@@ -150,7 +150,7 @@ TEST_F(HessianProjectionTest, ComputeKappa_Method3_AllPositive) {
     Eigen::VectorXd eigenvalues(3);
     eigenvalues << 1.0, 2.0, 3.0;
     
-    double kappa = TinyAD::computeKappa(3, eigenvalues, 1e-8);
+    double kappa = TinyAD::computeKappa(3, eigenvalues);
     // lambda_max=3, lambda_min=1, 同号分支
     // nominator=2, denominator=2+|4|+eps≈6, kappa=0.333
     EXPECT_NEAR(kappa, 0.33333, 1e-4);
@@ -160,7 +160,7 @@ TEST_F(HessianProjectionTest, ComputeKappa_Method4_MixedSign) {
     Eigen::VectorXd eigenvalues(3);
     eigenvalues << -2.0, 1.0, 3.0;
     
-    double kappa = TinyAD::computeKappa(4, eigenvalues, 1e-8);
+    double kappa = TinyAD::computeKappa(4, eigenvalues);
     EXPECT_LE(kappa, 1.0);
     EXPECT_GE(kappa, 0.0);
 }
@@ -168,7 +168,7 @@ TEST_F(HessianProjectionTest, ComputeKappa_Method4_MixedSign) {
 // ==================== computeAlpha_J 测试 ====================
 TEST_F(HessianProjectionTest, ComputeAlphaJ_Method1_PositiveJ) {
     double J = 1.2;
-    double alpha_J = TinyAD::computeAlpha_J(J, 1e-8);
+    double alpha_J = TinyAD::computeAlpha_J(J);
     // J=1.2 在拉伸侧，应该得到合理的 alpha_J
     EXPECT_LE(alpha_J, 1.0);
     EXPECT_GE(alpha_J, 0.0);
@@ -176,7 +176,7 @@ TEST_F(HessianProjectionTest, ComputeAlphaJ_Method1_PositiveJ) {
 
 TEST_F(HessianProjectionTest, ComputeAlphaJ_Method1_NegativeJ) {
     double J = -0.5;
-    double alpha_J = TinyAD::computeAlpha_J(J, 1e-8);
+    double alpha_J = TinyAD::computeAlpha_J(J);
     // J<0 时应该激活 safe 因子，alpha_J 可能较小
     EXPECT_LE(alpha_J, 1.0);
     EXPECT_GE(alpha_J, 0.0);
@@ -185,7 +185,7 @@ TEST_F(HessianProjectionTest, ComputeAlphaJ_Method1_NegativeJ) {
 TEST_F(HessianProjectionTest, ComputeAlphaJ_Method2) {
     g_j_mode = 2;
     double J = 1.8;
-    double alpha_J = TinyAD::computeAlpha_J(J, 1e-8);
+    double alpha_J = TinyAD::computeAlpha_J(J);
     // J=1.8 > J_threshold=1.5
     // alpha_J = (1.8-1.5)/(2.5-1.5)=0.3
     EXPECT_NEAR(alpha_J, 0.3, 1e-4);
@@ -194,7 +194,7 @@ TEST_F(HessianProjectionTest, ComputeAlphaJ_Method2) {
 TEST_F(HessianProjectionTest, ComputeAlphaJ_Method2_NegativeJ) {
     g_j_mode = 2;
     double J = -0.5;
-    double alpha_J = TinyAD::computeAlpha_J(J, 1e-8);
+    double alpha_J = TinyAD::computeAlpha_J(J);
     // J<0: alpha_J = |1+J| = 0.5
     EXPECT_NEAR(alpha_J, 0.5, 1e-4);
 }
@@ -202,7 +202,7 @@ TEST_F(HessianProjectionTest, ComputeAlphaJ_Method2_NegativeJ) {
 TEST_F(HessianProjectionTest, ComputeAlphaJ_Method2_SmallJ) {
     g_j_mode = 2;
     double J = 0.5;
-    double alpha_J = TinyAD::computeAlpha_J(J, 1e-8);
+    double alpha_J = TinyAD::computeAlpha_J(J);
     // J < J_threshold=1.5, alpha_J = 0
     EXPECT_DOUBLE_EQ(alpha_J, 0.0);
 }
@@ -210,7 +210,7 @@ TEST_F(HessianProjectionTest, ComputeAlphaJ_Method2_SmallJ) {
 TEST_F(HessianProjectionTest, ComputeAlphaJ_Method3) {
     g_j_mode = 3;
     double J = 1.2;
-    double alpha_J = TinyAD::computeAlpha_J(J, 1e-8);
+    double alpha_J = TinyAD::computeAlpha_J(J);
     // alpha = (1.2-0.9)^2 = 0.09
     EXPECT_NEAR(alpha_J, 0.09, 1e-4);
 }
@@ -218,7 +218,7 @@ TEST_F(HessianProjectionTest, ComputeAlphaJ_Method3) {
 TEST_F(HessianProjectionTest, ComputeAlphaJ_Default) {
     g_j_mode = 99;  // 触发 default
     double J = 1.2;
-    double alpha_J = TinyAD::computeAlpha_J(J, 1e-8);
+    double alpha_J = TinyAD::computeAlpha_J(J);
     EXPECT_LE(alpha_J, 1.0);
     EXPECT_GE(alpha_J, 0.0);
 }
@@ -258,7 +258,7 @@ TEST(ComputeAlphaHessianTest, AllPositiveEigenvalues) {
     Eigen::VectorXd eigenvalues(3);
     eigenvalues << 1.0, 2.0, 3.0;
     
-    double alpha = TinyAD::computeAlpha_hessian(eigenvalues, 1e-8);
+    double alpha = TinyAD::computeAlpha_hessian(eigenvalues);
     // sum_lambda=6, sum_neg_lambda=0, r=0, alpha=0
     EXPECT_DOUBLE_EQ(alpha, 0.0);
 }
@@ -267,7 +267,7 @@ TEST(ComputeAlphaHessianTest, AllNegativeEigenvalues) {
     Eigen::VectorXd eigenvalues(3);
     eigenvalues << -1.0, -2.0, -3.0;
     
-    double alpha = TinyAD::computeAlpha_hessian(eigenvalues, 1e-8);
+    double alpha = TinyAD::computeAlpha_hessian(eigenvalues);
     // sum_lambda=6, sum_neg_lambda=6, r=1, alpha=1-exp(-4)=0.9817
     EXPECT_NEAR(alpha, 0.981684, 1e-4);
 }
@@ -276,14 +276,14 @@ TEST(ComputeAlphaHessianTest, MixedSignEigenvalues) {
     Eigen::VectorXd eigenvalues(3);
     eigenvalues << -2.0, 1.0, 3.0;
     
-    double alpha = TinyAD::computeAlpha_hessian(eigenvalues, 1e-8);
+    double alpha = TinyAD::computeAlpha_hessian(eigenvalues);
     // sum_lambda=6, sum_neg_lambda=2, r=0.333, alpha=1-exp(-1.333)=0.736
     EXPECT_NEAR(alpha, 0.736, 1e-3);
 }
 
 TEST(ComputeAlphaHessianTest, EmptyEigenvalues) {
     Eigen::VectorXd eigenvalues(0);
-    double alpha = TinyAD::computeAlpha_hessian(eigenvalues, 1e-8);
+    double alpha = TinyAD::computeAlpha_hessian(eigenvalues);
     // sum_lambda=0, r=0/(0+eps)=0, alpha=0
     EXPECT_DOUBLE_EQ(alpha, 0.0);
 }
@@ -459,7 +459,7 @@ TEST_F(HessianProjectionTest, ComputeAlphaGradKappa_Mode1) {
     g_kappa_mode = 1;
     Eigen::VectorXd eigenvalues(3);
     eigenvalues << -2.0, 1.0, 3.0;
-    double kappa = TinyAD::computeAlpha_grad_kappa(eigenvalues, 1e-8, 1.0);
+    double kappa = TinyAD::computeAlpha_grad_kappa(eigenvalues,  1.0);
     EXPECT_LE(kappa, 1.0);
     EXPECT_GE(kappa, 0.0);
 }
@@ -468,7 +468,7 @@ TEST_F(HessianProjectionTest, ComputeAlphaGradKappa_Mode2) {
     g_kappa_mode = 2;
     Eigen::VectorXd eigenvalues(3);
     eigenvalues << -2.0, 1.0, 3.0;
-    double kappa = TinyAD::computeAlpha_grad_kappa(eigenvalues, 1e-8, 0.6);
+    double kappa = TinyAD::computeAlpha_grad_kappa(eigenvalues,  0.6);
     EXPECT_DOUBLE_EQ(kappa, 0.6);
 }
 
@@ -476,7 +476,7 @@ TEST_F(HessianProjectionTest, ComputeAlphaGradKappa_Mode3) {
     g_kappa_mode = 3;
     Eigen::VectorXd eigenvalues(3);
     eigenvalues << -2.0, 1.0, 3.0;
-    double kappa = TinyAD::computeAlpha_grad_kappa(eigenvalues, 1e-8, 0.3);
+    double kappa = TinyAD::computeAlpha_grad_kappa(eigenvalues,  0.3);
     // Kappa = max(computeKappa, 0.3)
     EXPECT_GE(kappa, 0.3);
     EXPECT_LE(kappa, 1.0);
@@ -494,7 +494,7 @@ TEST_F(HessianProjectionTest, ComputeAlphaGrad_Basic) {
     eigenvalues << -1.0, 2.0;
     double gamma = 0.5;
     
-    TinyAD::computeAlpha_grad(alpha_grad_pos, alpha_grad_neg, k, proj_g, eigenvalues, gamma, 1.0, 1e-8);
+    TinyAD::computeAlpha_grad(alpha_grad_pos, alpha_grad_neg, k, proj_g, eigenvalues, gamma, 1.0);
     
     EXPECT_LE(alpha_grad_pos, 1.0);
     EXPECT_GE(alpha_grad_pos, 0.0);
